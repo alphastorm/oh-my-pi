@@ -65,7 +65,7 @@ function createControllerContext() {
 		setFocus: vi.fn(),
 		start: vi.fn(),
 		stop: vi.fn(),
-		terminal: { columns: 120 },
+		terminal: { columns: 120, rows: 40 },
 	} as unknown as TestContext["ui"] & {
 		setFocus: Mock<any>;
 		requestRender: Mock<any>;
@@ -74,6 +74,7 @@ function createControllerContext() {
 		editor,
 		editorContainer,
 		ui,
+		collabController: { host: undefined, beginInputRequired: () => () => {} },
 		hookEditor: undefined,
 	} as unknown as TestContext;
 

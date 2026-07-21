@@ -11,10 +11,10 @@
  * drives a real CollabGuestLink over the in-memory relay so every guest→host
  * frame is observable.
  */
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
-import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
+import { type CollabGuestUiResult, CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import {
 	COLLAB_PROTO,
 	type CollabFrame,
@@ -30,6 +30,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { CollabUiRequest, CollabUiRequestDraft } from "@oh-my-pi/pi-wire";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: shared FakeWebSocket + InMemoryRelay harness (see
@@ -252,6 +253,27 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 			prefill?: string,
 			dialogOptions?: ExtensionUIDialogOptions,
 		): Promise<string | undefined> => presentStub({ kind: "editor", title, prefill, dialogOptions }),
+		presentCollabGuestUi: (request: CollabUiRequest, signal: AbortSignal): Promise<string | undefined> =>
+			request.kind === "select"
+				? presentStub({
+						kind: "select",
+						title: request.title,
+						options: request.options,
+						dialogOptions: {
+							signal,
+							...(request.initialIndex === undefined ? {} : { initialIndex: request.initialIndex }),
+							...(request.selectionMarker === undefined ? {} : { selectionMarker: request.selectionMarker }),
+							...(request.checkedIndices === undefined ? {} : { checkedIndices: request.checkedIndices }),
+							...(request.markableCount === undefined ? {} : { markableCount: request.markableCount }),
+							...(request.helpText === undefined ? {} : { helpText: request.helpText }),
+						},
+					})
+				: presentStub({
+						kind: "editor",
+						title: request.title,
+						prefill: request.prefill,
+						dialogOptions: { signal },
+					}),
 	} as unknown as InteractiveModeContext;
 
 	const guest = new CollabGuestLink(ctx);
@@ -441,8 +463,13 @@ describe("collab TUI guest ui-request handling (#4049)", () => {
 // join must fail fast with the host's reason instead of hanging until the
 // welcome timeout.
 
+type LeaseTrackedContext = InteractiveModeContext & {
+	readonly attentionLeases: { begun: number; released: number };
+};
+
 /** Minimal InteractiveModeContext double: only the members CollabHost touches. */
-function makeHostContext(): InteractiveModeContext {
+function makeHostContext(): LeaseTrackedContext {
+	const attentionLeases = { begun: 0, released: 0 };
 	return {
 		settings: { get: () => "" },
 		sessionManager: {
@@ -473,8 +500,20 @@ function makeHostContext(): InteractiveModeContext {
 		},
 		ui: { requestRender: () => {} },
 		showStatus: () => {},
-		collabController: { host: undefined },
-	} as unknown as InteractiveModeContext;
+		collabController: {
+			host: undefined,
+			beginInputRequired: () => {
+				attentionLeases.begun += 1;
+				let released = false;
+				return () => {
+					if (released) return;
+					released = true;
+					attentionLeases.released += 1;
+				};
+			},
+		},
+		attentionLeases,
+	} as unknown as LeaseTrackedContext;
 }
 
 /** Raw wire-speaking guest with a configurable hello proto. */
@@ -623,7 +662,7 @@ interface LocalDialogStub {
 class StubDialogController extends ExtensionUiController {
 	readonly localDialogs: LocalDialogStub[] = [];
 
-	override showHookSelector(
+	protected override showLocalSelector(
 		title: string,
 		_options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
@@ -641,6 +680,31 @@ class StubDialogController extends ExtensionUiController {
 	}
 }
 
+class ImmediateDialogController extends ExtensionUiController {
+	protected override showLocalSelector(
+		_title: string,
+		options: ExtensionUISelectItem[],
+		_dialogOptions?: InteractiveSelectorDialogOptions,
+	): Promise<string | undefined> {
+		const first = options[0];
+		return Promise.resolve(typeof first === "string" ? first : first?.label);
+	}
+
+	protected override showLocalInput(): Promise<string | undefined> {
+		return Promise.resolve("local input");
+	}
+
+	protected override showLocalEditor(): Promise<string | undefined> {
+		return Promise.resolve("local editor");
+	}
+}
+
+class RejectingDialogController extends ImmediateDialogController {
+	protected override showLocalSelector(): Promise<string | undefined> {
+		return Promise.reject(new Error("local dialog failed"));
+	}
+}
+
 describe("collab host dialog vs teardown (#4049 follow-up)", () => {
 	async function openRace(): Promise<{
 		host: CollabHost;
@@ -649,6 +713,7 @@ describe("collab host dialog vs teardown (#4049 follow-up)", () => {
 		result: Promise<string | undefined>;
 		dialog: LocalDialogStub;
 		requestFrame: CollabFrame & { t: "ui-request" };
+		ctx: LeaseTrackedContext;
 		cleanup(): Promise<void>;
 	}> {
 		const ctx = makeHostContext();
@@ -660,7 +725,7 @@ describe("collab host dialog vs teardown (#4049 follow-up)", () => {
 		const welcome = await guest.nextFrame();
 		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
 
-		const result = controller.showCollabAwareSelector("Deploy?", ["Yes", "No"]);
+		const result = controller.showHookSelector("Deploy?", ["Yes", "No"]);
 		const requestFrame = await guest.nextFrame();
 		if (requestFrame.t !== "ui-request") throw new Error(`expected ui-request, got ${requestFrame.t}`);
 		const dialog = controller.localDialogs[0];
@@ -672,6 +737,7 @@ describe("collab host dialog vs teardown (#4049 follow-up)", () => {
 			result,
 			dialog,
 			requestFrame,
+			ctx,
 			cleanup: async () => {
 				guest.socket.close();
 				await host.stop("test done");
@@ -689,8 +755,10 @@ describe("collab host dialog vs teardown (#4049 follow-up)", () => {
 			// the local dialog live, so `result` stays pending until it
 			// settles and wins with its value.
 			race.dialog.settle("stay-local");
+			expect(race.ctx.attentionLeases).toEqual({ begun: 1, released: 0 });
 			expect(await race.result).toBe("stay-local");
-			expect(race.dialog.signal?.aborted).toBe(false);
+			expect(race.dialog.signal?.aborted).toBe(true);
+			expect(race.ctx.attentionLeases).toEqual({ begun: 1, released: 1 });
 		} finally {
 			await race.cleanup();
 		}
@@ -700,8 +768,10 @@ describe("collab host dialog vs teardown (#4049 follow-up)", () => {
 		const race = await openRace();
 		try {
 			race.guest.socket.send({ t: "ui-response", reqId: race.requestFrame.request.reqId, value: undefined });
+			expect(race.ctx.attentionLeases).toEqual({ begun: 1, released: 0 });
 			expect(await race.result).toBeUndefined();
 			expect(race.dialog.signal?.aborted).toBe(true);
+			expect(race.ctx.attentionLeases).toEqual({ begun: 1, released: 1 });
 		} finally {
 			await race.cleanup();
 		}
@@ -711,11 +781,122 @@ describe("collab host dialog vs teardown (#4049 follow-up)", () => {
 		const race = await openRace();
 		try {
 			race.guest.socket.send({ t: "ui-response", reqId: race.requestFrame.request.reqId, value: "No" });
+			expect(race.ctx.attentionLeases).toEqual({ begun: 1, released: 0 });
 			expect(await race.result).toBe("No");
 			expect(race.dialog.signal?.aborted).toBe(true);
+			expect(race.ctx.attentionLeases).toEqual({ begun: 1, released: 1 });
 		} finally {
 			await race.cleanup();
 		}
+	});
+
+	it("does not acquire attention when no writable guest accepts the request", async () => {
+		const ctx = makeHostContext();
+		const requestGuestUi = mock(() => null);
+		Object.assign(ctx.collabController, { host: { requestGuestUi } as unknown as CollabHost });
+		const controller = new ImmediateDialogController(ctx);
+
+		expect(await controller.showHookSelector("Local only?", ["Yes", "No"])).toBe("Yes");
+		expect(requestGuestUi).toHaveBeenCalledTimes(1);
+		expect(ctx.attentionLeases).toEqual({ begun: 0, released: 0 });
+	});
+
+	it("does not acquire attention when the retained-request cap refuses admission", async () => {
+		const ctx = makeHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		Object.assign(ctx.collabController, { host });
+		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+		const abort = new AbortController();
+		const retained = Array.from({ length: 64 }, (_, index) =>
+			host.requestGuestUi({ kind: "select", title: `Pending ${index}`, options: ["Yes"] }, abort.signal),
+		);
+		expect(retained.every(request => request !== null)).toBe(true);
+		const controller = new StubDialogController(ctx);
+		try {
+			const result = controller.showHookSelector("Over capacity?", ["Local"]);
+			const dialog = controller.localDialogs[0];
+			if (!dialog) throw new Error("expected local dialog");
+			expect(ctx.attentionLeases).toEqual({ begun: 0, released: 0 });
+			dialog.settle("Local");
+			expect(await result).toBe("Local");
+			expect(ctx.attentionLeases).toEqual({ begun: 0, released: 0 });
+		} finally {
+			abort.abort();
+			guest.socket.close();
+			await host.stop("test done");
+			await Promise.all(retained.filter(request => request !== null));
+		}
+	});
+
+	it("keeps callback, timeout, disabled, slider, and prompt-style dialogs local-only", async () => {
+		const ctx = makeHostContext();
+		const requestGuestUi = mock(() => Promise.resolve({ kind: "answered", value: "remote" } as const));
+		Object.assign(ctx.collabController, { host: { requestGuestUi } as unknown as CollabHost });
+		const controller = new ImmediateDialogController(ctx);
+
+		expect(await controller.showHookSelector("Callback?", ["Yes"], { onLeft: () => {} })).toBe("Yes");
+		expect(await controller.showHookSelector("Timeout?", ["Yes"], { timeout: 10 })).toBe("Yes");
+		expect(await controller.showHookSelector("Disabled?", ["Yes"], { disabledIndices: [0] })).toBe("Yes");
+		expect(
+			await controller.showHookSelector("Slider?", ["Yes"], undefined, {
+				slider: { segments: [{ label: "Low" }, { label: "High" }], index: 1 },
+			}),
+		).toBe("Yes");
+		expect(await controller.showHookInput("Input?", undefined, { timeout: 10 })).toBe("local input");
+		expect(await controller.showHookEditor("Editor?", undefined, undefined, { promptStyle: true })).toBe(
+			"local editor",
+		);
+		expect(await controller.showHookConfirm("Confirm?", "Proceed?", { timeout: 10 })).toBe(true);
+
+		expect(requestGuestUi).not.toHaveBeenCalled();
+		expect(ctx.attentionLeases).toEqual({ begun: 0, released: 0 });
+	});
+
+	it("brackets safe selector, input, editor, and confirm responses with one lease each", async () => {
+		const ctx = makeHostContext();
+		const requestGuestUi = mock(() => Promise.resolve({ kind: "unavailable" } as const));
+		Object.assign(ctx.collabController, { host: { requestGuestUi } as unknown as CollabHost });
+		const controller = new ImmediateDialogController(ctx);
+
+		expect(await controller.showHookSelector("Select?", ["Yes"])).toBe("Yes");
+		expect(await controller.showHookInput("Input?")).toBe("local input");
+		expect(await controller.showHookEditor("Editor?")).toBe("local editor");
+		expect(await controller.showHookConfirm("Confirm?", "Proceed?")).toBe(true);
+
+		expect(requestGuestUi).toHaveBeenCalledTimes(4);
+		expect(ctx.attentionLeases).toEqual({ begun: 4, released: 4 });
+	});
+
+	it("aborts both race sides and releases attention when the remote side rejects", async () => {
+		const ctx = makeHostContext();
+		const requestGuestUi = mock(() => Promise.reject(new Error("remote request failed")));
+		Object.assign(ctx.collabController, { host: { requestGuestUi } as unknown as CollabHost });
+		const controller = new StubDialogController(ctx);
+
+		const result = controller.showHookSelector("Failure?", ["Yes"]);
+		const dialog = controller.localDialogs[0];
+		if (!dialog) throw new Error("expected local dialog");
+		await expect(result).rejects.toThrow("remote request failed");
+		expect(dialog.signal?.aborted).toBe(true);
+		expect(ctx.attentionLeases).toEqual({ begun: 1, released: 1 });
+	});
+
+	it("aborts both race sides and releases attention when the local side rejects", async () => {
+		const ctx = makeHostContext();
+		let remoteSignal: AbortSignal | undefined;
+		const requestGuestUi = mock((_request: CollabUiRequestDraft, signal: AbortSignal) => {
+			remoteSignal = signal;
+			return new Promise<CollabGuestUiResult>(() => {});
+		});
+		Object.assign(ctx.collabController, { host: { requestGuestUi } as unknown as CollabHost });
+		const controller = new RejectingDialogController(ctx);
+
+		await expect(controller.showHookSelector("Failure?", ["Yes"])).rejects.toThrow("local dialog failed");
+		expect(remoteSignal?.aborted).toBe(true);
+		expect(ctx.attentionLeases).toEqual({ begun: 1, released: 1 });
 	});
 });
 
@@ -774,7 +955,7 @@ describe("guest ask unavailable literal answer (#4375)", () => {
  *  mounting the local AskDialogComponent. The local dialog is never driven
  *  (no input), so it never settles and the remote guest wins the race.
  *  Reuses makeHostContext for the CollabHost-facing members. */
-function makeAskHostContext(): InteractiveModeContext {
+function makeAskHostContext(): LeaseTrackedContext {
 	const base = makeHostContext();
 	// Stub only the surface the local ask-dialog mount path calls: container
 	// clear/addChild, ui focus/render, and editor (dispose path). The real
@@ -792,7 +973,7 @@ function makeAskHostContext(): InteractiveModeContext {
 			addInputListener: () => () => {},
 		},
 	};
-	return stub as unknown as InteractiveModeContext;
+	return stub as unknown as LeaseTrackedContext;
 }
 
 describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () => {
@@ -838,6 +1019,7 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 
 			// First ui-request: Next must be absent (no answer yet).
 			const first = await nextUiRequest(guest);
+			expect(ctx.attentionLeases).toEqual({ begun: 1, released: 0 });
 			const firstLabels = selectLabels(first);
 			expect(firstLabels).not.toContain("Next →");
 
@@ -846,12 +1028,14 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 
 			// Second ui-request: Next must now be present.
 			const second = await nextUiRequest(guest);
+			expect(ctx.attentionLeases).toEqual({ begun: 1, released: 0 });
 			const secondLabels = selectLabels(second);
 			expect(secondLabels).toContain("Next →");
 
 			// Guest selects Next to submit.
 			guest.socket.send({ t: "ui-response", reqId: second.request.reqId, value: "Next →" });
 			const settled = await result;
+			expect(ctx.attentionLeases).toEqual({ begun: 1, released: 1 });
 			expect(settled?.kind).toBe("submit");
 			if (settled?.kind === "submit") {
 				expect(settled.results[0]?.selectedOptions).toEqual(["Option A"]);

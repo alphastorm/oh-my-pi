@@ -52,6 +52,7 @@ import {
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import type { CollabUiRequest } from "@oh-my-pi/pi-wire";
 import { reset as resetCapabilities } from "../capability";
 import { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
@@ -1292,6 +1293,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 		});
 
+		// Collaboration starts once the interactive context and session are ready,
+		// before extension startup hooks can present response-producing UI.
+		await this.collabController.autoStart();
+
 		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
 
@@ -1432,9 +1437,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			// replay with the newly detected palette.
 			onTerminalAppearanceChange(mode, appearanceRefreshWasRequested ? {} : undefined);
 		});
-
-		// Collaboration starts only after the interactive context and session are ready.
-		await this.collabController.autoStart();
 	}
 
 	/** Reload the title-generation system prompt override for the provided working
@@ -5585,8 +5587,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return runProviderSetupWizard(this);
 	}
 
-	showHookConfirm(title: string, message: string): Promise<boolean> {
-		return this.#extensionUiController.showHookConfirm(title, message);
+	showHookConfirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean> {
+		return this.#extensionUiController.showHookConfirm(title, message, dialogOptions);
 	}
 
 	// Input handling
@@ -5815,8 +5817,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.hideHookSelector();
 	}
 
-	showHookInput(title: string, placeholder?: string): Promise<string | undefined> {
-		return this.#extensionUiController.showHookInput(title, placeholder);
+	showHookInput(
+		title: string,
+		placeholder?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<string | undefined> {
+		return this.#extensionUiController.showHookInput(title, placeholder, dialogOptions);
 	}
 
 	hideHookInput(): void {
@@ -5830,6 +5836,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined> {
 		return this.#extensionUiController.showHookEditor(title, prefill, dialogOptions, editorOptions);
+	}
+
+	presentCollabGuestUi(request: CollabUiRequest, signal: AbortSignal): Promise<string | undefined> {
+		return this.#extensionUiController.presentCollabGuestUi(request, signal);
 	}
 
 	hideHookEditor(): void {

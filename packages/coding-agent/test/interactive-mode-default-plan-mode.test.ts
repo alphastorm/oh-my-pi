@@ -142,6 +142,21 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		);
 	}
 
+	it("starts collaboration before extension startup hooks can present UI", async () => {
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }));
+		const order: string[] = [];
+		vi.spyOn(created.collabController, "autoStart").mockImplementation(async () => {
+			order.push("collaboration");
+		});
+		vi.spyOn(created, "initHooksAndCustomTools").mockImplementation(async () => {
+			order.push("hooks");
+		});
+
+		await created.init({ suppressWelcomeIntro: true });
+
+		expect(order).toEqual(["collaboration", "hooks"]);
+	});
+
 	it("enters plan mode at startup when the setting is enabled", async () => {
 		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }));
 

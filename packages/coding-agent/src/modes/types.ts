@@ -2,6 +2,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } from "@oh-my-pi/pi-tui";
+import type { CollabUiRequest } from "@oh-my-pi/pi-wire";
 import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
 import type { KeybindingsManager } from "../config/keybindings";
@@ -434,7 +435,7 @@ export interface InteractiveModeContext {
 	showSessionPinSelector(): Promise<void>;
 	showResetUsageSelector(): Promise<void>;
 	showProviderSetup(): Promise<void>;
-	showHookConfirm(title: string, message: string): Promise<boolean>;
+	showHookConfirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean>;
 	showDebugSelector(): Promise<void>;
 	showAgentHub(options?: { requireContent?: boolean; armCloseTap?: boolean }): void;
 	resetObserverRegistry(): void;
@@ -515,7 +516,11 @@ export interface InteractiveModeContext {
 		dialogOptions?: InteractiveSelectorDialogOptions,
 	): Promise<string | undefined>;
 	hideHookSelector(): void;
-	showHookInput(title: string, placeholder?: string): Promise<string | undefined>;
+	showHookInput(
+		title: string,
+		placeholder?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<string | undefined>;
 	hideHookInput(): void;
 	showHookEditor(
 		title: string,
@@ -523,6 +528,7 @@ export interface InteractiveModeContext {
 		dialogOptions?: ExtensionUIDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined>;
+	presentCollabGuestUi(request: CollabUiRequest, signal: AbortSignal): Promise<string | undefined>;
 	hideHookEditor(): void;
 	showHookNotify(message: string, type?: "info" | "warning" | "error"): void;
 	showHookCustom<T>(

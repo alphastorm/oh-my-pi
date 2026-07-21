@@ -669,18 +669,8 @@ export class CollabGuestLink {
 		if (this.#readOnly || this.#pendingUiRequests.has(request.reqId)) return;
 		const abort = new AbortController();
 		this.#pendingUiRequests.set(request.reqId, abort);
-		const dialog =
-			request.kind === "select"
-				? this.#ctx.showHookSelector(request.title, request.options, {
-						signal: abort.signal,
-						initialIndex: request.initialIndex,
-						selectionMarker: request.selectionMarker,
-						checkedIndices: request.checkedIndices,
-						markableCount: request.markableCount,
-						helpText: request.helpText,
-					})
-				: this.#ctx.showHookEditor(request.title, request.prefill, { signal: abort.signal });
-		dialog
+		void this.#ctx
+			.presentCollabGuestUi(request, abort.signal)
 			.then(value => {
 				// Identity check: only the presentation that still owns the reqId
 				// may respond. An abort from #endUiRequest / #clearUiRequests

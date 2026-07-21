@@ -1,6 +1,6 @@
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
-import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
+import type { CollabUiRequest, CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import { KeybindingsManager } from "../../config/keybindings";
 import type {
 	CompactOptions,
@@ -122,7 +122,7 @@ export class ExtensionUiController {
 			},
 			getEditorText: () => this.ctx.editor.getText(),
 			editor: (title, prefill, dialogOptions, editorOptions) =>
-				this.showCollabAwareEditor(title, prefill, dialogOptions, editorOptions),
+				this.showHookEditor(title, prefill, dialogOptions, editorOptions),
 			addAutocompleteProvider: factory => this.ctx.addAutocompleteProvider(factory),
 			get theme() {
 				return theme;
@@ -577,60 +577,46 @@ export class ExtensionUiController {
 		this.ctx.ui.requestRender();
 	}
 
-	async showCollabAwareSelector(
-		title: string,
-		options: ExtensionUISelectItem[],
-		dialogOptions?: InteractiveSelectorDialogOptions,
-		extra?: { slider?: HookSelectorSlider },
-	): Promise<string | undefined> {
-		const request: CollabUiRequestDraft = {
-			kind: "select",
-			title,
-			options: toWireSelectOptions(options),
-			initialIndex: dialogOptions?.initialIndex,
-			selectionMarker: dialogOptions?.selectionMarker,
-			checkedIndices: dialogOptions?.checkedIndices ? [...dialogOptions.checkedIndices] : undefined,
-			markableCount: dialogOptions?.markableCount,
-			helpText: dialogOptions?.helpText,
+	async #withInputRequired<Result>(operation: (markAccepted: () => void) => Promise<Result>): Promise<Result> {
+		let release: (() => void) | undefined;
+		const markAccepted = (): void => {
+			release ??= this.ctx.collabController.beginInputRequired();
 		};
-		return this.#raceCollabDialog(request, dialogOptions?.signal, signal =>
-			this.showHookSelector(title, options, { ...dialogOptions, signal }, extra),
-		);
-	}
-
-	async showCollabAwareEditor(
-		title: string,
-		prefill?: string,
-		dialogOptions?: ExtensionUIDialogOptions,
-		editorOptions?: { promptStyle?: boolean },
-	): Promise<string | undefined> {
-		const request: CollabUiRequestDraft = { kind: "editor", title, prefill };
-		return this.#raceCollabDialog(request, dialogOptions?.signal, signal =>
-			this.showHookEditor(title, prefill, { ...dialogOptions, signal }, editorOptions),
-		);
+		try {
+			return await operation(markAccepted);
+		} finally {
+			release?.();
+		}
 	}
 
 	async showAskDialog(
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
-		const host = this.ctx.collabController.host;
-		if (!host) return this.#showLocalAskDialog(questions, dialogOptions);
-		const localAbort = new AbortController();
-		const remoteAbort = new AbortController();
-		const parentSignal = dialogOptions?.signal;
-		const localSignal = parentSignal ? AbortSignal.any([parentSignal, localAbort.signal]) : localAbort.signal;
-		const remoteSignal = parentSignal ? AbortSignal.any([parentSignal, remoteAbort.signal]) : remoteAbort.signal;
-		const localWinner = this.#showLocalAskDialog(questions, { ...dialogOptions, signal: localSignal }).then(
-			(value): CollabAskDialogWinner => ({ source: "local", value }),
-		);
-		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(questions, remoteSignal).then(
-			result => (result === "unavailable" ? localWinner : { source: "remote", value: result }),
-		);
-		const winner = await Promise.race([localWinner, remoteWinner]);
-		if (winner.source === "remote") localAbort.abort();
-		else remoteAbort.abort();
-		return winner.value;
+		return this.#withInputRequired(async markAccepted => {
+			const host = this.ctx.collabController.host;
+			if (!host) return this.#showLocalAskDialog(questions, dialogOptions);
+			const localAbort = new AbortController();
+			const remoteAbort = new AbortController();
+			const parentSignal = dialogOptions?.signal;
+			const localSignal = parentSignal ? AbortSignal.any([parentSignal, localAbort.signal]) : localAbort.signal;
+			const remoteSignal = parentSignal ? AbortSignal.any([parentSignal, remoteAbort.signal]) : remoteAbort.signal;
+			try {
+				const localWinner = this.#showLocalAskDialog(questions, { ...dialogOptions, signal: localSignal }).then(
+					(value): CollabAskDialogWinner => ({ source: "local", value }),
+				);
+				const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(
+					questions,
+					remoteSignal,
+					markAccepted,
+				).then(result => (result === "unavailable" ? localWinner : { source: "remote", value: result }));
+				const winner = await Promise.race([localWinner, remoteWinner]);
+				return winner.value;
+			} finally {
+				localAbort.abort();
+				remoteAbort.abort();
+			}
+		});
 	}
 
 	#showLocalAskDialog(
@@ -743,34 +729,41 @@ export class ExtensionUiController {
 		signal: AbortSignal | undefined,
 		local: (signal: AbortSignal | undefined) => Promise<string | undefined>,
 	): Promise<string | undefined> {
-		const host = this.ctx.collabController.host;
-		if (!host) return local(signal);
-		const localAbort = new AbortController();
-		const remoteAbort = new AbortController();
-		const remote = host.requestGuestUi(
-			request,
-			signal ? AbortSignal.any([signal, remoteAbort.signal]) : remoteAbort.signal,
-		);
-		if (!remote) return local(signal);
-		const localWinner = local(signal ? AbortSignal.any([signal, localAbort.signal]) : localAbort.signal).then(
-			(value): CollabDialogWinner => ({ source: "local", value }),
-		);
-		const remoteWinner: Promise<CollabDialogWinner> = remote.then(result =>
-			result.kind === "answered" ? { source: "remote", value: result.value } : localWinner,
-		);
-		const winner = await Promise.race([localWinner, remoteWinner]);
-		if (winner.source === "remote") localAbort.abort();
-		else remoteAbort.abort();
-		return winner.value;
+		return this.#withInputRequired(async markAccepted => {
+			const host = this.ctx.collabController.host;
+			if (!host) return local(signal);
+			const localAbort = new AbortController();
+			const remoteAbort = new AbortController();
+			try {
+				const remote = host.requestGuestUi(
+					request,
+					signal ? AbortSignal.any([signal, remoteAbort.signal]) : remoteAbort.signal,
+				);
+				if (!remote) return local(signal);
+				markAccepted();
+				const localWinner = local(signal ? AbortSignal.any([signal, localAbort.signal]) : localAbort.signal).then(
+					(value): CollabDialogWinner => ({ source: "local", value }),
+				);
+				const remoteWinner: Promise<CollabDialogWinner> = remote.then(result =>
+					result.kind === "answered" ? { source: "remote", value: result.value } : localWinner,
+				);
+				const winner = await Promise.race([localWinner, remoteWinner]);
+				return winner.value;
+			} finally {
+				localAbort.abort();
+				remoteAbort.abort();
+			}
+		});
 	}
 
 	async #runGuestAskDialog(
 		questions: ExtensionAskDialogQuestion[],
 		signal: AbortSignal,
+		markAccepted: () => void,
 	): Promise<ExtensionAskDialogResult | "unavailable" | undefined> {
 		const results: ExtensionAskDialogResultItem[] = [];
 		for (const question of questions) {
-			const result = await this.#runGuestAskQuestion(question, signal);
+			const result = await this.#runGuestAskQuestion(question, signal, markAccepted);
 			if (result === "unavailable" || result === undefined) return result;
 			if (result === "chat") return { kind: "chat" };
 			results.push(result);
@@ -781,6 +774,7 @@ export class ExtensionUiController {
 	async #runGuestAskQuestion(
 		question: ExtensionAskDialogQuestion,
 		signal: AbortSignal,
+		markAccepted: () => void,
 	): Promise<ExtensionAskDialogResultItem | "chat" | "unavailable" | undefined> {
 		const selected = new Set<string>();
 		let customInput: string | undefined;
@@ -814,6 +808,7 @@ export class ExtensionUiController {
 							: "up/down navigate  enter toggle  esc cancel",
 					},
 					signal,
+					markAccepted,
 				);
 				if (choice.kind === "unavailable") return "unavailable";
 				if (choice.kind === "cancelled") return undefined;
@@ -823,6 +818,7 @@ export class ExtensionUiController {
 					const input = await this.#requestGuestUiString(
 						{ kind: "editor", title: boundPromptTitle("Custom answer: ", question.question) },
 						signal,
+						markAccepted,
 					);
 					if (input.kind === "unavailable") return "unavailable";
 					// Guest cancelled the Other editor: keep the ask open and
@@ -852,6 +848,7 @@ export class ExtensionUiController {
 						helpText: "up/down navigate  enter select  esc cancel",
 					},
 					signal,
+					markAccepted,
 				);
 				if (choice.kind === "unavailable") return "unavailable";
 				if (choice.kind === "cancelled") return undefined;
@@ -860,6 +857,7 @@ export class ExtensionUiController {
 					const input = await this.#requestGuestUiString(
 						{ kind: "editor", title: boundPromptTitle("Custom answer: ", question.question) },
 						signal,
+						markAccepted,
 					);
 					if (input.kind === "unavailable") return "unavailable";
 					// Guest cancelled the Other editor: re-show the select list
@@ -882,11 +880,16 @@ export class ExtensionUiController {
 		};
 	}
 
-	async #requestGuestUiString(request: CollabUiRequestDraft, signal: AbortSignal): Promise<GuestUiResult> {
+	async #requestGuestUiString(
+		request: CollabUiRequestDraft,
+		signal: AbortSignal,
+		markAccepted: () => void,
+	): Promise<GuestUiResult> {
 		const host = this.ctx.collabController.host;
 		if (!host) return { kind: "unavailable" };
 		const remote = host.requestGuestUi(request, signal);
 		if (!remote) return { kind: "unavailable" };
+		markAccepted();
 		const result = await remote;
 		if (result.kind === "unavailable") return { kind: "unavailable" };
 		return typeof result.value === "string" ? { kind: "answered", value: result.value } : { kind: "cancelled" };
@@ -896,6 +899,61 @@ export class ExtensionUiController {
 	 * Show a selector for hooks.
 	 */
 	showHookSelector(
+		title: string,
+		options: ExtensionUISelectItem[],
+		dialogOptions?: InteractiveSelectorDialogOptions,
+		extra?: { slider?: HookSelectorSlider },
+	): Promise<string | undefined> {
+		if (!this.#canMirrorSelector(dialogOptions, extra)) {
+			return this.showLocalSelector(title, options, dialogOptions, extra);
+		}
+		const request: CollabUiRequestDraft = {
+			kind: "select",
+			title,
+			options: toWireSelectOptions(options),
+			...(dialogOptions?.initialIndex === undefined ? {} : { initialIndex: dialogOptions.initialIndex }),
+			...(dialogOptions?.selectionMarker === undefined ? {} : { selectionMarker: dialogOptions.selectionMarker }),
+			...(dialogOptions?.checkedIndices === undefined ? {} : { checkedIndices: [...dialogOptions.checkedIndices] }),
+			...(dialogOptions?.markableCount === undefined ? {} : { markableCount: dialogOptions.markableCount }),
+			...(dialogOptions?.helpText === undefined ? {} : { helpText: dialogOptions.helpText }),
+		};
+		return this.#raceCollabDialog(request, dialogOptions?.signal, signal =>
+			this.showLocalSelector(title, options, { ...dialogOptions, signal }, extra),
+		);
+	}
+
+	presentCollabGuestUi(request: CollabUiRequest, signal: AbortSignal): Promise<string | undefined> {
+		if (request.kind === "editor") {
+			return this.showLocalEditor(request.title, request.prefill, { signal });
+		}
+		return this.showLocalSelector(request.title, request.options, {
+			signal,
+			...(request.initialIndex === undefined ? {} : { initialIndex: request.initialIndex }),
+			...(request.selectionMarker === undefined ? {} : { selectionMarker: request.selectionMarker }),
+			...(request.checkedIndices === undefined ? {} : { checkedIndices: request.checkedIndices }),
+			...(request.markableCount === undefined ? {} : { markableCount: request.markableCount }),
+			...(request.helpText === undefined ? {} : { helpText: request.helpText }),
+		});
+	}
+
+	#canMirrorSelector(
+		dialogOptions: InteractiveSelectorDialogOptions | undefined,
+		extra: { slider?: HookSelectorSlider } | undefined,
+	): boolean {
+		return (
+			dialogOptions?.timeout === undefined &&
+			dialogOptions?.onTimeout === undefined &&
+			dialogOptions?.onTimeoutStart === undefined &&
+			dialogOptions?.onTimeoutReset === undefined &&
+			dialogOptions?.onLeft === undefined &&
+			dialogOptions?.onRight === undefined &&
+			dialogOptions?.onExternalEditor === undefined &&
+			dialogOptions?.disabledIndices === undefined &&
+			extra?.slider === undefined
+		);
+	}
+
+	protected showLocalSelector(
 		title: string,
 		options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
@@ -973,6 +1031,17 @@ export class ExtensionUiController {
 		placeholder?: string,
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
+		if (!this.#canMirrorDialog(dialogOptions)) return this.showLocalInput(title, placeholder, dialogOptions);
+		return this.#raceCollabDialog({ kind: "editor", title }, dialogOptions?.signal, signal =>
+			this.showLocalInput(title, placeholder, { ...dialogOptions, signal }),
+		);
+	}
+
+	protected showLocalInput(
+		title: string,
+		placeholder?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<string | undefined> {
 		return this.#presentDialog(dialogOptions?.signal, settle => {
 			this.ctx.hookInput = new HookInputComponent(
 				title,
@@ -1009,6 +1078,34 @@ export class ExtensionUiController {
 	 * Show a multi-line editor for hooks (with Ctrl+G support).
 	 */
 	showHookEditor(
+		title: string,
+		prefill?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+		editorOptions?: { promptStyle?: boolean },
+	): Promise<string | undefined> {
+		if (!this.#canMirrorDialog(dialogOptions) || editorOptions?.promptStyle) {
+			return this.showLocalEditor(title, prefill, dialogOptions, editorOptions);
+		}
+		const request: CollabUiRequestDraft = {
+			kind: "editor",
+			title,
+			...(prefill === undefined ? {} : { prefill }),
+		};
+		return this.#raceCollabDialog(request, dialogOptions?.signal, signal =>
+			this.showLocalEditor(title, prefill, { ...dialogOptions, signal }, editorOptions),
+		);
+	}
+
+	#canMirrorDialog(dialogOptions: ExtensionUIDialogOptions | undefined): boolean {
+		return (
+			dialogOptions?.timeout === undefined &&
+			dialogOptions?.onTimeout === undefined &&
+			dialogOptions?.onTimeoutStart === undefined &&
+			dialogOptions?.onTimeoutReset === undefined
+		);
+	}
+
+	protected showLocalEditor(
 		title: string,
 		prefill?: string,
 		dialogOptions?: ExtensionUIDialogOptions,

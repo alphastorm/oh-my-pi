@@ -529,10 +529,14 @@ describe("collab proto handshake (#4049)", () => {
 			expect(reply.message).toContain("protocol mismatch");
 			expect(reply.message).toContain(`host speaks v${COLLAB_PROTO}`);
 			expect(reply.message).toContain(`guest sent v${COLLAB_PROTO - 1}`);
-			// The rejected guest was never admitted: no participant entry, and a
-			// host ask finds no writable peer to route to.
+			// The rejected guest was never admitted. A host ask is retained for a
+			// later writer instead of being exposed to the stale peer.
 			expect(host.participants.filter(p => p.role !== "host")).toEqual([]);
-			expect(host.requestGuestUi({ kind: "select", title: "anyone?", options: ["Yes"] })).toBeNull();
+			const abort = new AbortController();
+			const pending = host.requestGuestUi({ kind: "select", title: "anyone?", options: ["Yes"] }, abort.signal);
+			if (!pending) throw new Error("expected retained UI request");
+			abort.abort();
+			expect(await pending).toEqual({ kind: "unavailable" });
 		} finally {
 			guest.socket.close();
 			await host.stop("test done");

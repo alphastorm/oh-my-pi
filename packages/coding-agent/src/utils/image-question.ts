@@ -14,6 +14,7 @@ import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort 
 import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";
 import type { LoadedImageInput } from "./image-loading";
+import { imageQuestionKey, runVisionRequestOnce } from "./image-vision-dedupe";
 
 /** Vision-capable model selected for an explicit image question. */
 export interface ResolvedImageQuestionModel {
@@ -128,27 +129,55 @@ export async function askImageQuestion(
 
 	let response: AssistantMessage;
 	try {
-		response = await instrumentedCompleteSimple(
-			model,
-			{
-				systemPrompt: [prompt.render(imageQuestionSystemPromptTemplate)],
-				messages: [
+		const sessionId = session.getSessionId?.() ?? undefined;
+		const qualificationNoRetry = process.env.CODE_MODE_QUALIFICATION_ACTIVE === "1";
+		const requestScope = qualificationNoRetry
+			? session.sessionManager
+					?.getBranch()
+					.findLast(entry => entry.type === "message" && entry.message.role === "user")?.id
+			: session.sessionManager?.getEntries().length.toString();
+		if (qualificationNoRetry && (!apiKey || !sessionId || !requestScope)) {
+			throw new ToolError(
+				"Qualification image questions require a resolved credential, stable session, and user-turn scope.",
+			);
+		}
+		response = await runVisionRequestOnce(
+			sessionId,
+			"image_question",
+			requestScope,
+			imageQuestionKey(image.data, question, `${model.provider}/${model.id}`, `mimeType:${image.mimeType}`),
+			() =>
+				instrumentedCompleteSimple(
+					model,
 					{
-						role: "user",
-						content: [
-							{ type: "image", data: image.data, mimeType: image.mimeType },
-							{ type: "text", text: question },
+						systemPrompt: [prompt.render(imageQuestionSystemPromptTemplate)],
+						messages: [
+							{
+								role: "user",
+								content: [
+									{ type: "image", data: image.data, mimeType: image.mimeType },
+									{ type: "text", text: question },
+								],
+								timestamp: Date.now(),
+							},
 						],
-						timestamp: Date.now(),
 					},
-				],
-			},
-			{
-				apiKey: modelRegistry.resolver(model, session.getSessionId?.() ?? undefined),
-				signal: effectiveSignal,
-				reasoning,
-			},
-			{ telemetry, oneshotKind: "image_question", completeImpl },
+					{
+						apiKey: qualificationNoRetry ? apiKey : modelRegistry.resolver(model, sessionId),
+						signal: effectiveSignal,
+						reasoning,
+						...(qualificationNoRetry
+							? {
+									preferWebsockets: false,
+									codexSseMaxAttempts: 1,
+									loopGuard: { enabled: false },
+								}
+							: {}),
+					},
+					{ telemetry, oneshotKind: "image_question", completeImpl },
+				),
+			undefined,
+			qualificationNoRetry,
 		);
 	} catch (error) {
 		if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {

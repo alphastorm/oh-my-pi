@@ -608,6 +608,7 @@ const streamOpenAIResponsesOnce = (
 						shouldRetryResponse: (response, bodyText) =>
 							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
 							lastSubmittedRequestWasFullReplay !== true,
+						maxAttempts: options?.codexSseMaxAttempts,
 						// Transient 408/429/5xx get Retry-After-aware transport
 						// retries; the first-event watchdog aborts `requestSignal`,
 						// so retries cannot extend the caller's deadline.

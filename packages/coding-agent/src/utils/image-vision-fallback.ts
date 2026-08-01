@@ -18,7 +18,8 @@ import {
 	instrumentedCompleteSimple,
 	resolveTelemetry,
 } from "@oh-my-pi/pi-agent-core";
-import type { Api, completeSimple, ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, completeSimple, ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { logger, prompt, toError } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -27,6 +28,7 @@ import type { Settings } from "../config/settings";
 import { type LocalProtocolOptions, resolveLocalRoot } from "../internal-urls";
 import describeUserPrompt from "../prompts/tools/image-attachment-describe.md" with { type: "text" };
 import describeSystemPrompt from "../prompts/tools/image-attachment-describe-system.md" with { type: "text" };
+import { imageQuestionKey, runVisionRequestOnce } from "./image-vision-dedupe";
 
 /** Telemetry tag for the oneshot vision-description calls. */
 const ONESHOT_KIND = "image_attachment_describe";
@@ -41,6 +43,12 @@ const DESCRIPTION_UNAVAILABLE_NOTE =
 /** Registry surface needed to resolve a vision model and authorize requests. */
 export type VisionFallbackRegistry = Pick<ModelRegistry, "getAvailable" | "getApiKey" | "resolver">;
 
+export interface QualificationVisionObservation {
+	requestCount: number;
+	duplicateSuppressedCount: number;
+	transportFailureCount: number;
+}
+
 export interface DescribeAttachedImagesDeps {
 	/** Active (text-only) model the prompt is destined for. */
 	activeModel: Model<Api>;
@@ -52,8 +60,12 @@ export interface DescribeAttachedImagesDeps {
 	activeModelString?: string;
 	telemetryConfig?: AgentTelemetryConfig;
 	sessionId?: string;
+	/** Stable identity for one provider turn; changes before a later retry may run. */
+	requestScope?: string;
 	/** Test seam: overrides the underlying completeSimple call. */
 	completeImpl?: typeof completeSimple;
+	/** Qualification-only aggregate; carries counts/classes, never provider content. */
+	qualificationObservation?: QualificationVisionObservation;
 }
 
 /** Map an image MIME type to a file extension for the saved artifact. */
@@ -118,32 +130,96 @@ function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | unde
 	);
 }
 
+function isQualificationTransportFailure(errorId: number, status: number | undefined): boolean {
+	return (
+		AIError.isTransientStatus(status) ||
+		AIError.is(errorId, AIError.Flag.Transient) ||
+		AIError.is(errorId, AIError.Flag.UsageLimit)
+	);
+}
+
+function assistantTransportFailure(message: AssistantMessage): boolean {
+	return isQualificationTransportFailure(AIError.classifyMessage(message), message.errorStatus);
+}
+
+function thrownTransportFailure(error: unknown): boolean {
+	return isQualificationTransportFailure(AIError.classify(error), AIError.status(error));
+}
+
 /** Run one vision-description round-trip; returns trimmed text or `null` on any failure. */
 async function describeImage(
 	image: ImageContent,
 	visionModel: Model<Api>,
 	deps: DescribeAttachedImagesDeps,
+	apiKey: string | undefined,
 	telemetry: AgentTelemetry | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<string | null> {
+	const qualificationNoRetry = process.env.CODE_MODE_QUALIFICATION_ACTIVE === "1";
+	if (qualificationNoRetry && (!apiKey || !deps.sessionId || !deps.requestScope)) {
+		throw new Error(
+			"Qualification attachment description requires a resolved credential, stable session, and request scope.",
+		);
+	}
 	try {
-		const response = await instrumentedCompleteSimple(
-			visionModel,
-			{
-				systemPrompt: [prompt.render(describeSystemPrompt)],
-				messages: [
-					{
-						role: "user",
-						content: [
-							{ type: "image", data: image.data, mimeType: image.mimeType },
-							{ type: "text", text: prompt.render(describeUserPrompt) },
-						],
-						timestamp: Date.now(),
-					},
-				],
+		const question = prompt.render(describeUserPrompt);
+		const observation = qualificationNoRetry ? deps.qualificationObservation : undefined;
+		const response = await runVisionRequestOnce(
+			deps.sessionId,
+			"attachment",
+			deps.requestScope,
+			imageQuestionKey(
+				image.data,
+				question,
+				`${visionModel.provider}/${visionModel.id}`,
+				`passthrough:${image.mimeType}`,
+			),
+			async () => {
+				if (observation) observation.requestCount += 1;
+				try {
+					const result = await instrumentedCompleteSimple(
+						visionModel,
+						{
+							systemPrompt: [prompt.render(describeSystemPrompt)],
+							messages: [
+								{
+									role: "user",
+									content: [
+										{ type: "image", data: image.data, mimeType: image.mimeType },
+										{ type: "text", text: question },
+									],
+									timestamp: Date.now(),
+								},
+							],
+						},
+						{
+							apiKey: qualificationNoRetry ? apiKey : deps.modelRegistry.resolver(visionModel, deps.sessionId),
+							signal,
+							...(qualificationNoRetry
+								? {
+										preferWebsockets: false,
+										codexSseMaxAttempts: 1,
+										loopGuard: { enabled: false },
+									}
+								: {}),
+						},
+						{ telemetry, oneshotKind: ONESHOT_KIND, completeImpl: deps.completeImpl },
+					);
+					if (observation && result.stopReason === "error" && assistantTransportFailure(result)) {
+						observation.transportFailureCount += 1;
+					}
+					return result;
+				} catch (error) {
+					if (observation && thrownTransportFailure(error)) {
+						observation.transportFailureCount += 1;
+					}
+					throw error;
+				}
 			},
-			{ apiKey: deps.modelRegistry.resolver(visionModel, deps.sessionId), signal },
-			{ telemetry, oneshotKind: ONESHOT_KIND, completeImpl: deps.completeImpl },
+			() => {
+				if (observation) observation.duplicateSuppressedCount += 1;
+			},
+			qualificationNoRetry,
 		);
 		if (response.stopReason === "error" || response.stopReason === "aborted") {
 			logger.warn("image attachment description did not complete", {
@@ -186,7 +262,8 @@ export async function describeAttachedImagesForTextModel(
 			let description: string;
 			if (canDescribe && visionModel) {
 				description =
-					(await describeImage(image, visionModel, deps, telemetry, signal)) ?? DESCRIPTION_UNAVAILABLE_NOTE;
+					(await describeImage(image, visionModel, deps, apiKey, telemetry, signal)) ??
+					DESCRIPTION_UNAVAILABLE_NOTE;
 			} else {
 				description = NO_VISION_MODEL_NOTE;
 			}

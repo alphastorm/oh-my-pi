@@ -217,6 +217,7 @@ import type { EditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
+import { clearVisionRequestDedupe } from "../utils/image-vision-dedupe";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { resumeCommand } from "../utils/resume-command";
 import { generateSessionTitle } from "../utils/title-generator";
@@ -4188,6 +4189,7 @@ export class AgentSession {
 		this.#detachUsageBeforeQueueDequeue = undefined;
 		this.#detachUsageBeforeModelCall?.();
 		this.#detachUsageBeforeModelCall = undefined;
+		clearVisionRequestDedupe(this.sessionId);
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();

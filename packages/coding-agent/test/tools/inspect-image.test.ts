@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,6 +14,7 @@ import type { ImageAttachmentEntry, ToolSession } from "@oh-my-pi/pi-coding-agen
 import { InspectImageTool } from "@oh-my-pi/pi-coding-agent/tools/inspect-image";
 import { inspectImageToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/inspect-image-renderer";
 import { toolRenderers } from "@oh-my-pi/pi-coding-agent/tools/renderers";
+import { clearVisionRequestDedupe } from "@oh-my-pi/pi-coding-agent/utils/image-vision-dedupe";
 import { removeSyncWithRetries, sanitizeText } from "@oh-my-pi/pi-utils";
 
 const TINY_PNG_BASE64 =
@@ -52,6 +53,9 @@ interface CreateSessionOptions {
 	activeModel?: Model<"openai-responses">;
 	configureVisionRole?: boolean;
 	imageAttachments?: ImageAttachmentEntry[];
+	sessionEntryCount?: () => number;
+	includeSessionManager?: boolean;
+	qualificationScopeId?: string | null;
 }
 
 interface CompleteSimpleStub {
@@ -77,6 +81,7 @@ function createSession(
 		cwd,
 		hasUI: false,
 		getSessionFile: () => null,
+		getSessionId: () => cwd,
 		getSessionSpawns: () => "*",
 		getModelString: () => `${activeModel.provider}/${activeModel.id}`,
 		getActiveModelString: () => `${activeModel.provider}/${activeModel.id}`,
@@ -88,6 +93,24 @@ function createSession(
 			authStorage: { rotateSessionCredential: async () => false },
 			resolver: () => async () => apiKey,
 		} as unknown as NonNullable<ToolSession["modelRegistry"]>,
+		sessionManager:
+			options.includeSessionManager === false
+				? undefined
+				: ({
+						getEntries: () => Array.from({ length: options.sessionEntryCount?.() ?? 0 }),
+						getBranch: () =>
+							options.qualificationScopeId === null
+								? []
+								: [
+										{
+											type: "message",
+											id: options.qualificationScopeId ?? "user-turn",
+											parentId: null,
+											timestamp: "2026-08-20T00:00:00.000Z",
+											message: { role: "user", content: "test", timestamp: 0 },
+										},
+									],
+					} as unknown as NonNullable<ToolSession["sessionManager"]>),
 	};
 	if (options.imageAttachments) {
 		session.getImageAttachments = () => options.imageAttachments ?? [];
@@ -174,6 +197,10 @@ describe("InspectImageTool", () => {
 		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 	});
 
+	afterEach(() => {
+		clearVisionRequestDedupe(testDir);
+	});
+
 	afterAll(() => {
 		removeSyncWithRetries(testDir);
 	});
@@ -236,6 +263,131 @@ describe("InspectImageTool", () => {
 		expect(stub.calls).toHaveLength(1);
 		const options = stub.calls[0]?.[2] as { reasoning?: string } | undefined;
 		expect(options?.reasoning).toBe("high");
+	});
+
+	it("disables nested retries and credential rotation during qualification", async () => {
+		const previous = process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+		process.env.CODE_MODE_QUALIFICATION_ACTIVE = "1";
+		try {
+			const stub = createCompleteSimpleSuccessStub("Red");
+			const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key"), stub.fn);
+			await tool.execute("call-qualification", {
+				path: imagePath,
+				question: "What dominant color is this image?",
+			});
+
+			expect(stub.calls).toHaveLength(1);
+			const options = stub.calls[0]?.[2] as
+				| {
+						apiKey?: unknown;
+						preferWebsockets?: boolean;
+						codexSseMaxAttempts?: number;
+						loopGuard?: { enabled?: boolean };
+				  }
+				| undefined;
+			expect(options?.apiKey).toBe("test-key");
+			expect(options?.preferWebsockets).toBe(false);
+			expect(options?.codexSseMaxAttempts).toBe(1);
+			expect(options?.loopGuard).toEqual({ enabled: false });
+		} finally {
+			if (previous === undefined) {
+				delete process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+			} else {
+				process.env.CODE_MODE_QUALIFICATION_ACTIVE = previous;
+			}
+		}
+	});
+
+	it("fails closed before a qualification request without a stable scope", async () => {
+		const previous = process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+		process.env.CODE_MODE_QUALIFICATION_ACTIVE = "1";
+		try {
+			const stub = createCompleteSimpleSuccessStub("Red");
+			const tool = new InspectImageTool(
+				createSession(testDir, visionModel, "test-key", Settings.isolated(), {
+					includeSessionManager: false,
+				}),
+				stub.fn,
+			);
+			await expect(
+				tool.execute("call-qualification-no-scope", {
+					path: imagePath,
+					question: "What dominant color is this image?",
+				}),
+			).rejects.toThrow(/requires a resolved credential, stable session, and user-turn scope/);
+			expect(stub.calls).toHaveLength(0);
+		} finally {
+			if (previous === undefined) {
+				delete process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+			} else {
+				process.env.CODE_MODE_QUALIFICATION_ACTIVE = previous;
+			}
+		}
+	});
+
+	it("keeps a qualification scope stable while tool results extend the session", async () => {
+		const previous = process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+		process.env.CODE_MODE_QUALIFICATION_ACTIVE = "1";
+		try {
+			let sessionEntryCount = 1;
+			const stub = createCompleteSimpleSuccessStub("Red");
+			const tool = new InspectImageTool(
+				createSession(testDir, visionModel, "test-key", Settings.isolated(), {
+					sessionEntryCount: () => sessionEntryCount,
+					qualificationScopeId: "user-turn-1",
+				}),
+				stub.fn,
+			);
+			const first = await tool.execute("call-qualification-first", {
+				path: imagePath,
+				question: "What dominant color is this image?",
+			});
+			sessionEntryCount += 1;
+			const duplicate = await tool.execute("call-qualification-duplicate", {
+				path: imagePath,
+				question: "  WHAT dominant color is this IMAGE?  ",
+			});
+
+			expect(duplicate.content).toEqual(first.content);
+			expect(stub.calls).toHaveLength(1);
+		} finally {
+			if (previous === undefined) {
+				delete process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+			} else {
+				process.env.CODE_MODE_QUALIFICATION_ACTIVE = previous;
+			}
+		}
+	});
+
+	it("collapses in-flight duplicates but delegates later turns and distinct follow-ups", async () => {
+		const imagePath = path.join(testDir, "screen.png");
+		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
+		const stub = createCompleteSimpleSuccessStub("answer");
+		let sessionEntryCount = 0;
+		const tool = new InspectImageTool(
+			createSession(testDir, visionModel, "test-key", Settings.isolated(), {
+				sessionEntryCount: () => sessionEntryCount,
+			}),
+			stub.fn,
+		);
+		const [first, duplicate] = await Promise.all([
+			tool.execute("call-first", { path: imagePath, question: "What is visible?" }),
+			tool.execute("call-duplicate", { path: imagePath, question: "  WHAT   is visible?  " }),
+		]);
+		sessionEntryCount += 1;
+		const laterTurn = await tool.execute("call-later-turn", {
+			path: imagePath,
+			question: "What is visible?",
+		});
+		const followUp = await tool.execute("call-follow-up", {
+			path: imagePath,
+			question: "Quote the visible text.",
+		});
+
+		expect(first.content).toEqual(duplicate.content);
+		expect(laterTurn.content).toEqual([{ type: "text", text: "answer" }]);
+		expect(followUp.content).toEqual([{ type: "text", text: "answer" }]);
+		expect(stub.calls).toHaveLength(3);
 	});
 
 	it("resolves pasted image labels from current attachments without using cwd", async () => {

@@ -74,6 +74,33 @@ describe("OpenAI transport concurrency-admission 429 (#8854)", () => {
 		expect((error as OpenAIHttpError).status).toBe(429);
 	});
 
+	test("honors a caller-owned one-attempt bound for generic transport failures", async () => {
+		let attempts = 0;
+		const fetch = mockFetch(() => {
+			attempts++;
+			return new Response(JSON.stringify({ error: { message: "Service unavailable" } }), {
+				status: 503,
+				headers: { "content-type": "application/json" },
+			});
+		});
+
+		const error = await postOpenAIStream({
+			url: "https://api.openai.com/v1/chat/completions",
+			headers: {},
+			body: { model: "gpt-4o", messages: [] },
+			signal: new AbortController().signal,
+			fetch,
+			maxAttempts: 1,
+		}).then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+
+		expect(attempts).toBe(1);
+		expect(error).toBeInstanceOf(OpenAIHttpError);
+		expect((error as OpenAIHttpError).status).toBe(503);
+	});
+
 	// Scope guard: the opt-out must not globally disable Retry-After. A generic
 	// RPM/quota 429 without the concurrency marker is still retried.
 	test("still retries a generic 429 that lacks the concurrency marker", async () => {

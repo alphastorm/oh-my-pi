@@ -8,6 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type DescribeAttachedImagesDeps,
 	describeAttachedImagesForTextModel,
+	type QualificationVisionObservation,
 } from "@oh-my-pi/pi-coding-agent/utils/image-vision-fallback";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -55,11 +56,48 @@ function makeCompleteStub(text: string): { calls: unknown[][]; fn: typeof comple
 	return { calls, fn };
 }
 
+function makeTransportFailureStub(): typeof completeSimple {
+	return (async () => ({
+		role: "assistant",
+		api: visionModel.api,
+		provider: visionModel.provider,
+		model: visionModel.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "error",
+		errorStatus: 503,
+		errorMessage: "Service unavailable",
+		timestamp: Date.now(),
+		content: [],
+	})) as typeof completeSimple;
+}
+
+function makeThrownTransportFailureStub(): {
+	calls: number;
+	fn: typeof completeSimple;
+} {
+	const state = {
+		calls: 0,
+		fn: (async () => {
+			state.calls += 1;
+			throw Object.assign(new Error("Service unavailable"), { status: 503 });
+		}) as typeof completeSimple,
+	};
+	return state;
+}
+
 function makeDeps(
 	artifactsDir: string,
 	available: Model<"openai-responses">[],
 	completeImpl: typeof completeSimple,
 	apiKey: string | undefined = "test-key",
+	qualificationObservation?: QualificationVisionObservation,
 ): DescribeAttachedImagesDeps {
 	return {
 		activeModel: textModel,
@@ -69,9 +107,12 @@ function makeDeps(
 			resolver: () => async () => apiKey,
 		} as unknown as DescribeAttachedImagesDeps["modelRegistry"],
 		settings: Settings.isolated(),
-		localProtocolOptions: { getArtifactsDir: () => artifactsDir, getSessionId: () => "test-session" },
+		localProtocolOptions: { getArtifactsDir: () => artifactsDir, getSessionId: () => artifactsDir },
 		activeModelString: `${textModel.provider}/${textModel.id}`,
 		completeImpl,
+		sessionId: artifactsDir,
+		requestScope: "test-turn",
+		qualificationObservation,
 	};
 }
 
@@ -109,6 +150,137 @@ describe("describeAttachedImagesForTextModel", () => {
 		expect(saved.toString("base64")).toBe(TINY_PNG_BASE64);
 	});
 
+	it("disables nested retries and credential rotation during qualification", async () => {
+		const previous = process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+		process.env.CODE_MODE_QUALIFICATION_ACTIVE = "1";
+		try {
+			const stub = makeCompleteStub("A red balloon.");
+			const image = {
+				type: "image",
+				data: TINY_PNG_BASE64,
+				mimeType: "image/png",
+			} as const;
+			const observation: QualificationVisionObservation = {
+				requestCount: 0,
+				duplicateSuppressedCount: 0,
+				transportFailureCount: 0,
+			};
+			await describeAttachedImagesForTextModel(
+				[image, image],
+				makeDeps(testDir, [textModel, visionModel], stub.fn, "test-key", observation),
+			);
+
+			expect(stub.calls).toHaveLength(1);
+			const options = stub.calls[0]?.[2] as
+				| {
+						apiKey?: unknown;
+						preferWebsockets?: boolean;
+						codexSseMaxAttempts?: number;
+						loopGuard?: { enabled?: boolean };
+				  }
+				| undefined;
+			expect(options?.apiKey).toBe("test-key");
+			expect(options?.preferWebsockets).toBe(false);
+			expect(options?.codexSseMaxAttempts).toBe(1);
+			expect(options?.loopGuard).toEqual({ enabled: false });
+			expect(observation).toEqual({
+				requestCount: 1,
+				duplicateSuppressedCount: 1,
+				transportFailureCount: 0,
+			});
+		} finally {
+			if (previous === undefined) {
+				delete process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+			} else {
+				process.env.CODE_MODE_QUALIFICATION_ACTIVE = previous;
+			}
+		}
+	});
+
+	it("fails closed before a qualification request without a stable request scope", async () => {
+		const previous = process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+		process.env.CODE_MODE_QUALIFICATION_ACTIVE = "1";
+		try {
+			const stub = makeCompleteStub("A red balloon.");
+			const deps = makeDeps(testDir, [textModel, visionModel], stub.fn);
+			deps.requestScope = undefined;
+			await expect(
+				describeAttachedImagesForTextModel([{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }], deps),
+			).rejects.toThrow(/requires a resolved credential, stable session, and request scope/);
+			expect(stub.calls).toHaveLength(0);
+		} finally {
+			if (previous === undefined) {
+				delete process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+			} else {
+				process.env.CODE_MODE_QUALIFICATION_ACTIVE = previous;
+			}
+		}
+	});
+
+	it("records qualification attachment transport failures without raw content", async () => {
+		const previous = process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+		process.env.CODE_MODE_QUALIFICATION_ACTIVE = "1";
+		try {
+			const observation: QualificationVisionObservation = {
+				requestCount: 0,
+				duplicateSuppressedCount: 0,
+				transportFailureCount: 0,
+			};
+			const blocks = await describeAttachedImagesForTextModel(
+				[{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+				makeDeps(testDir, [textModel, visionModel], makeTransportFailureStub(), "test-key", observation),
+			);
+
+			expect(blocks[0]?.text).toContain("Image description unavailable");
+			expect(observation).toEqual({
+				requestCount: 1,
+				duplicateSuppressedCount: 0,
+				transportFailureCount: 1,
+			});
+		} finally {
+			if (previous === undefined) {
+				delete process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+			} else {
+				process.env.CODE_MODE_QUALIFICATION_ACTIVE = previous;
+			}
+		}
+	});
+
+	it("shares one thrown transport failure across duplicate attachments", async () => {
+		const previous = process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+		process.env.CODE_MODE_QUALIFICATION_ACTIVE = "1";
+		try {
+			const observation: QualificationVisionObservation = {
+				requestCount: 0,
+				duplicateSuppressedCount: 0,
+				transportFailureCount: 0,
+			};
+			const stub = makeThrownTransportFailureStub();
+			const image = {
+				type: "image",
+				data: TINY_PNG_BASE64,
+				mimeType: "image/png",
+			} as const;
+			const blocks = await describeAttachedImagesForTextModel(
+				[image, image],
+				makeDeps(testDir, [textModel, visionModel], stub.fn, "test-key", observation),
+			);
+
+			expect(stub.calls).toBe(1);
+			expect(blocks.every(block => block.text.includes("Image description unavailable"))).toBe(true);
+			expect(observation).toEqual({
+				requestCount: 1,
+				duplicateSuppressedCount: 1,
+				transportFailureCount: 1,
+			});
+		} finally {
+			if (previous === undefined) {
+				delete process.env.CODE_MODE_QUALIFICATION_ACTIVE;
+			} else {
+				process.env.CODE_MODE_QUALIFICATION_ACTIVE = previous;
+			}
+		}
+	});
 	it("saves the image but emits a no-vision note when no vision model is available", async () => {
 		const stub = makeCompleteStub("should not be used");
 		const blocks = await describeAttachedImagesForTextModel(
@@ -148,5 +320,18 @@ describe("describeAttachedImagesForTextModel", () => {
 
 		const paths = blocks.map(b => b.text.match(/path="(local:\/\/[^"]+)"/)![1]);
 		expect(paths[0]).toBe(paths[1]);
+	});
+	it("delegates at most once for the same image and question in one session", async () => {
+		const image = { type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" } as const;
+		const stub = makeCompleteStub("one description");
+		const deps = makeDeps(testDir, [textModel, visionModel], stub.fn);
+
+		const [first, second] = await Promise.all([
+			describeAttachedImagesForTextModel([image], deps),
+			describeAttachedImagesForTextModel([image], deps),
+		]);
+
+		expect(first).toEqual(second);
+		expect(stub.calls).toHaveLength(1);
 	});
 });

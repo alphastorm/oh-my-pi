@@ -31,6 +31,7 @@ import {
 	MAX_IMAGE_INPUT_BYTES,
 	webpExclusionForModel,
 } from "../utils/image-loading";
+import { imageQuestionKey, runVisionRequestOnce } from "../utils/image-vision-dedupe";
 import type { ToolSession } from "./index";
 import { splitPathAndSelPreferringLiteral } from "./path-utils";
 import { ToolError } from "./tool-errors";
@@ -284,27 +285,60 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 
 		let response: AssistantMessage;
 		try {
-			response = await instrumentedCompleteSimple(
-				model,
-				{
-					systemPrompt: [prompt.render(inspectImageSystemPromptTemplate)],
-					messages: [
+			const sessionId = this.session.getSessionId?.() ?? undefined;
+			const qualificationNoRetry = process.env.CODE_MODE_QUALIFICATION_ACTIVE === "1";
+			const requestScope = qualificationNoRetry
+				? this.session.sessionManager
+						?.getBranch()
+						.findLast(entry => entry.type === "message" && entry.message.role === "user")?.id
+				: this.session.sessionManager?.getEntries().length.toString();
+			if (qualificationNoRetry && (!apiKey || !sessionId || !requestScope)) {
+				throw new ToolError(
+					"Qualification inspect_image requires a resolved credential, stable session, and user-turn scope.",
+				);
+			}
+			response = await runVisionRequestOnce(
+				sessionId,
+				"inspect_image",
+				requestScope,
+				imageQuestionKey(
+					imageInput.data,
+					params.question,
+					`${model.provider}/${model.id}`,
+					`autoResize:${autoResize};excludeWebP:${excludeWebP === true};mimeType:${imageInput.mimeType}`,
+				),
+				() =>
+					instrumentedCompleteSimple(
+						model,
 						{
-							role: "user",
-							content: [
-								{ type: "image", data: imageInput.data, mimeType: imageInput.mimeType },
-								{ type: "text", text: params.question },
+							systemPrompt: [prompt.render(inspectImageSystemPromptTemplate)],
+							messages: [
+								{
+									role: "user",
+									content: [
+										{ type: "image", data: imageInput.data, mimeType: imageInput.mimeType },
+										{ type: "text", text: params.question },
+									],
+									timestamp: Date.now(),
+								},
 							],
-							timestamp: Date.now(),
 						},
-					],
-				},
-				{
-					apiKey: modelRegistry.resolver(model, this.session.getSessionId?.() ?? undefined),
-					signal: effectiveSignal,
-					reasoning,
-				},
-				{ telemetry, oneshotKind: "inspect_image", completeImpl: this.completeImageRequest },
+						{
+							apiKey: qualificationNoRetry ? apiKey : modelRegistry.resolver(model, sessionId),
+							signal: effectiveSignal,
+							reasoning,
+							...(qualificationNoRetry
+								? {
+										preferWebsockets: false,
+										codexSseMaxAttempts: 1,
+										loopGuard: { enabled: false },
+									}
+								: {}),
+						},
+						{ telemetry, oneshotKind: "inspect_image", completeImpl: this.completeImageRequest },
+					),
+				undefined,
+				qualificationNoRetry,
 			);
 		} catch (error) {
 			if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {

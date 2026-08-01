@@ -560,10 +560,11 @@ export interface StreamOptions {
 	 */
 	streamIdleTimeoutMs?: number;
 	/**
-	 * Optional cap on Codex SSE pre-response attempts, including the initial
-	 * request. WebSocket retries and outer agent retries have separate budgets.
-	 * Finite values below `1` and non-finite values are clamped to one request;
-	 * omission preserves the provider default.
+	 * Optional cap on pre-response HTTP attempts, including the initial
+	 * request, for Codex SSE and OpenAI-compatible transports. WebSocket
+	 * retries and outer agent retries have separate budgets. Finite values
+	 * below `1` and non-finite values are clamped to one request; omission
+	 * preserves the provider default.
 	 */
 	codexSseMaxAttempts?: number;
 	/**

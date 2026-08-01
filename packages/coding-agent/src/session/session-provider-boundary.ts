@@ -1,5 +1,6 @@
 /** Provider-facing message, image, secret, and stream normalization for a session. */
 
+import { randomUUID } from "node:crypto";
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions, TextContent } from "@oh-my-pi/pi-ai";
@@ -14,7 +15,10 @@ import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
-import { describeAttachedImagesForTextModel } from "../utils/image-vision-fallback";
+import {
+	describeAttachedImagesForTextModel,
+	type QualificationVisionObservation,
+} from "../utils/image-vision-fallback";
 import { blobExtensionForImageMimeType } from "./blob-store";
 import { type CustomMessage, convertToLlm } from "./messages";
 import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
@@ -233,6 +237,15 @@ export class SessionProviderBoundary {
 			this.#host.settings.get("images.describeForTextModels");
 		if (!shouldDescribe || !model) return undefined;
 
+		const qualificationActive = process.env.CODE_MODE_QUALIFICATION_ACTIVE === "1";
+		const qualificationObservation: QualificationVisionObservation | undefined = qualificationActive
+			? {
+					requestCount: 0,
+					duplicateSuppressedCount: 0,
+					transportFailureCount: 0,
+				}
+			: undefined;
+		const requestScope = qualificationActive ? randomUUID() : this.#host.agent.state.messages.length.toString();
 		let blocks: TextContent[];
 		try {
 			blocks = await describeAttachedImagesForTextModel(
@@ -245,6 +258,8 @@ export class SessionProviderBoundary {
 					activeModelString: formatModelString(model),
 					telemetryConfig: this.#host.agent.telemetry,
 					sessionId: this.#host.sessionId(),
+					requestScope,
+					qualificationObservation,
 				},
 				signal,
 			);
@@ -259,6 +274,7 @@ export class SessionProviderBoundary {
 			role: "custom",
 			customType: IMAGE_ATTACHMENT_DESCRIPTION_TYPE,
 			content: blocks,
+			...(qualificationObservation ? { details: { qualificationVision: qualificationObservation } } : {}),
 			display: false,
 			attribution: "user",
 			timestamp: Date.now(),

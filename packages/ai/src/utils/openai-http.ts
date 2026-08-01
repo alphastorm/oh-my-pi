@@ -70,6 +70,8 @@ export interface OpenAIStreamRequestInit {
 	fetch?: FetchImpl;
 	/** Raw wire-frame observer (`onSseEvent` debug pipeline). */
 	onSseEvent?: SseEventObserver;
+	/** Total pre-response HTTP attempts, including the initial request. */
+	maxAttempts?: number;
 }
 
 export interface OpenAIStreamHandle<TEvent> {
@@ -88,13 +90,19 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
+	const maxAttempts =
+		init.maxAttempts === undefined
+			? DEFAULT_MAX_ATTEMPTS
+			: Number.isFinite(init.maxAttempts)
+				? Math.max(1, Math.trunc(init.maxAttempts))
+				: 1;
 	const response = await fetchWithRetry(init.url, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
 		body: JSON.stringify(init.body),
 		signal: init.signal,
 		fetch: init.fetch,
-		maxAttempts: DEFAULT_MAX_ATTEMPTS,
+		maxAttempts,
 		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 		// surfaces immediately instead of being slept-and-retried here; session
 		// recovery owns its backoff/fallback (issue #8854).

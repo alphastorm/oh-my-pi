@@ -57,32 +57,35 @@ fallback is used when that role is unset.
 
 ## Task 1: Session title generation (`providers.tinyModel`)
 
-**Task**: turn the first user message into a 3–6 word title. Tiny models (sub-1B) suffice.
+**Task**: turn the first user message into a 3–7 word title. Tiny models (sub-1B) suffice.
 
-**Winning recipe**:
+**Winning recipes**:
 
-- Plain system prompt (no few-shot).
-- **Prefill** the assistant turn with `<title>` and **stop at `</title>`**, then take the first line.
-- Greedy decoding (`do_sample:false`), `enable_thinking:false` in the chat template.
+- Existing local models use the title system prompt plus an assistant `<title>` prefill.
+- LFM2.5-350M instead uses two real user/assistant example turns and no prefill.
+- Greedy decoding (`do_sample:false`), `enable_thinking:false` in the chat template, and stop
+  matching limited to generated tokens.
 
 **What we learned**:
 
-- **Few-shot examples HURT sub-0.6B models** for titles; the tag-prefill rescues even 270M models.
+- Chat-level few-shot examples hurt the earlier sub-0.6B models but improve LFM2.5-350M.
 - **Token biasing (`bad_words_ids`) is a confirmed no-op** here — the prefill already controls the
   opener.
 
-**Leaderboard** (tag trick, CPU, warm):
+**Leaderboard** (q4, CPU, warm):
 
-| Model         | Verdict                             |
-| ------------- | ----------------------------------- |
-| LFM2-350M     | Best speed/quality balance (~212MB) |
-| Qwen3-0.6B    | Most robust                         |
-| gemma-3-270m  | Smallest viable                     |
-| Qwen2.5-0.5B  | Acceptable                          |
-| SmolLM2-135M  | Too small                           |
-| flan-t5-small | Rejected — just echoes the input    |
+| Model         | Verdict                                             |
+| ------------- | --------------------------------------------------- |
+| LFM2.5-350M   | Strong format adherence; requires chat-level few-shot |
+| LFM2-350M     | Best speed/quality balance (~212MB)                 |
+| Qwen3-0.6B    | Most robust                                         |
+| gemma-3-270m  | Smallest viable                                     |
+| Qwen2.5-0.5B  | Acceptable                                          |
+| SmolLM2-135M  | Too small                                           |
+| flan-t5-small | Rejected — just echoes the input                    |
 
-**Shipped local options**: `lfm2-350m`, `qwen3-0.6b`, `gemma-270m`, `qwen2.5-0.5b`, `lfm2-700m`.
+**Shipped local options**: `lfm2.5-350m`, `lfm2-350m`, `qwen3-0.6b`, `gemma-270m`, `qwen2.5-0.5b`,
+`lfm2-700m`.
 **Default setting**: `online`. The default local download for `omp tiny-models` is `lfm2-700m`.
 
 ## Task 2: Mnemopi memory (`providers.memoryModel`)

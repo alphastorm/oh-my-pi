@@ -19,6 +19,7 @@ import {
 	TINY_MODEL_DTYPE_SETTING_VALUES,
 } from "@oh-my-pi/pi-coding-agent/tiny/dtype";
 import {
+	getTinyTitleModelSpec,
 	ONLINE_TINY_TITLE_MODEL_KEY,
 	TINY_TITLE_MODEL_OPTIONS,
 	TINY_TITLE_MODEL_VALUES,
@@ -32,6 +33,7 @@ import type { TinyTitleWorkerInbound, TinyTitleWorkerOutbound } from "@oh-my-pi/
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import type { Subprocess } from "bun";
 import { buildCompletionPrompt } from "../src/tiny/completion-prompt";
+import { buildTitlePrompt, DEFAULT_TITLE_SYSTEM_PROMPT } from "../src/tiny/title-prompt";
 import { createStopOnTextCriteria, type TransformersRuntime } from "../src/tiny/worker";
 
 function getModelOrThrow(id: string): Model<Api> {
@@ -291,6 +293,102 @@ describe("tiny memory completion prompts", () => {
 
 		expect(await completion).toBe("extracted fact");
 		await client.terminate();
+	});
+});
+
+describe("tiny title prompts", () => {
+	it("uses chat-level examples without an assistant prefill for LFM2.5", () => {
+		const applyChatTemplate = vi.fn(() => "rendered prompt");
+		const tokenizer = { apply_chat_template: applyChatTemplate };
+		const spec = getTinyTitleModelSpec("lfm2.5-350m");
+
+		expect(
+			buildTitlePrompt(tokenizer as never, {
+				message: "add ARM64 release builds",
+				style: "titlePromptStyle" in spec ? spec.titlePromptStyle : undefined,
+			}),
+		).toBe("rendered prompt");
+		expect(applyChatTemplate).toHaveBeenCalledWith(
+			[
+				{ role: "system", content: expect.not.stringContaining("# Examples") },
+				{
+					role: "user",
+					content: "<user>\nthe login button is broken on mobile somehow, can you fix?\n</user>",
+				},
+				{ role: "assistant", content: "<title>Fix login button on mobile</title>" },
+				{
+					role: "user",
+					content: "<user>\nrefactor error handling in our API client, it's a mess\n</user>",
+				},
+				{ role: "assistant", content: "<title>Refactor API error handling</title>" },
+				{ role: "user", content: "<user>\nadd ARM64 release builds\n</user>" },
+			],
+			{
+				add_generation_prompt: true,
+				tokenize: false,
+				enable_thinking: false,
+			},
+		);
+	});
+
+	it("keeps the historical prompt and assistant prefill for existing models", () => {
+		const applyChatTemplate = vi.fn(() => "rendered prompt");
+		const tokenizer = { apply_chat_template: applyChatTemplate };
+		const spec = getTinyTitleModelSpec("lfm2-350m");
+
+		expect(
+			buildTitlePrompt(tokenizer as never, {
+				message: "add ARM64 release builds",
+				style: "titlePromptStyle" in spec ? spec.titlePromptStyle : undefined,
+			}),
+		).toBe("rendered prompt<title>");
+		expect(applyChatTemplate).toHaveBeenCalledWith(
+			[
+				{ role: "system", content: DEFAULT_TITLE_SYSTEM_PROMPT },
+				{ role: "user", content: "<user>\nadd ARM64 release builds\n</user>" },
+			],
+			expect.any(Object),
+		);
+	});
+
+	it("does not mix built-in examples into custom LFM2.5 title policy", () => {
+		const applyChatTemplate = vi.fn(() => "rendered prompt");
+		const tokenizer = { apply_chat_template: applyChatTemplate };
+
+		expect(
+			buildTitlePrompt(tokenizer as never, {
+				message: "add ARM64 release builds",
+				style: "chat-few-shot",
+				systemPrompt: " Use Spanish titles ",
+			}),
+		).toBe("rendered prompt<title>");
+		expect(applyChatTemplate).toHaveBeenCalledWith(
+			[
+				{ role: "system", content: "Use Spanish titles" },
+				{ role: "user", content: "<user>\nadd ARM64 release builds\n</user>" },
+			],
+			expect.any(Object),
+		);
+	});
+});
+
+describe("tiny title stopping criteria", () => {
+	it("ignores closing tags in the prompt and stops on a generated closing tag", () => {
+		class StoppingCriteria {}
+		const decode = vi.fn((ids: number[]) => (ids.includes(9) ? "</title>" : ""));
+		const criteria = createStopOnTextCriteria(
+			{ StoppingCriteria } as never,
+			{ decode } as never,
+			"</title>",
+		) as unknown as { _call(inputIds: number[][]): boolean[] };
+
+		expect(criteria._call([[9, 1]])).toEqual([false]);
+		expect(decode).toHaveBeenLastCalledWith([1], {
+			skip_special_tokens: false,
+			clean_up_tokenization_spaces: false,
+		});
+		expect(criteria._call([[9, 1, 2]])).toEqual([false]);
+		expect(criteria._call([[9, 1, 2, 9]])).toEqual([true]);
 	});
 });
 

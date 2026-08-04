@@ -5,8 +5,7 @@ import type {
 	TextGenerationStringOutput,
 	StoppingCriteria as TransformersStoppingCriteria,
 } from "@huggingface/transformers";
-import { getTinyModelsCacheDir, prompt } from "@oh-my-pi/pi-utils";
-import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
+import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
 import {
 	errorMessage,
 	errorText,
@@ -22,23 +21,21 @@ import {
 import { buildCompletionPrompt } from "./completion-prompt";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "./device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "./dtype";
-import { formatTitleUserMessage } from "./message-preproc";
 import {
 	getTinyLocalModelSpec,
+	getTinyTitleModelSpec,
 	type TinyLocalModelKey,
 	type TinyTitleLocalModelKey,
 	type TinyTitleLocalModelSpec,
 } from "./models";
 import { normalizeGeneratedTitle } from "./text";
+import { buildTitlePrompt, TITLE_CLOSE, TITLE_PREFILL } from "./title-prompt";
 import type { TinyTitleTransport, TinyTitleWorkerInbound } from "./title-protocol";
 
-const TITLE_PREFILL = "<title>";
-const TITLE_CLOSE = "</title>";
 const TITLE_MAX_NEW_TOKENS = 20;
 const STOP_DECODE_WINDOW_TOKENS = 32;
 const MEMORY_COMPLETION_DEFAULT_MAX_NEW_TOKENS = 256;
 const COMPLETION_MAX_NEW_TOKENS = 1024;
-const TINY_TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 
 const tinyModelDevicePreference = resolveTinyModelDevicePreference();
 const tinyModelDtypeOverride = resolveTinyModelDtypeOverride();
@@ -225,20 +222,6 @@ async function loadPipeline(
 	return loaded;
 }
 
-function buildPrompt(generator: TextGenerationPipeline, message: string, systemPrompt?: string): string {
-	const selectedSystemPrompt = systemPrompt?.trim() || TINY_TITLE_SYSTEM_PROMPT;
-	const chat = [
-		{ role: "system", content: selectedSystemPrompt },
-		{ role: "user", content: formatTitleUserMessage(message) },
-	];
-	const chatTemplateOptions = {
-		add_generation_prompt: true,
-		tokenize: false,
-		enable_thinking: false,
-	};
-	return `${generator.tokenizer.apply_chat_template(chat, chatTemplateOptions)}${TITLE_PREFILL}`;
-}
-
 function extractTinyTitle(text: string, sourceText: string): string | null {
 	const titleStart = text.lastIndexOf(TITLE_PREFILL);
 	const withoutPrefix = titleStart >= 0 ? text.slice(titleStart + TITLE_PREFILL.length) : text;
@@ -259,7 +242,12 @@ async function generateTitle(
 	systemPrompt?: string,
 ): Promise<string | null> {
 	const generator = await loadPipeline(modelKey, transport, requestId);
-	const promptText = buildPrompt(generator, message, systemPrompt);
+	const spec = getTinyTitleModelSpec(modelKey);
+	const promptText = buildTitlePrompt(generator.tokenizer, {
+		message,
+		style: "titlePromptStyle" in spec ? spec.titlePromptStyle : undefined,
+		systemPrompt,
+	});
 	const transformers = await loadTransformersRuntime(
 		transformersRuntime,
 		transport,

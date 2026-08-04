@@ -3,6 +3,8 @@ export const ONLINE_TINY_TITLE_MODEL_KEY = "online";
 /** Local model the `tiny-models` CLI downloads when none is named. Not the session-title default — that is {@link ONLINE_TINY_TITLE_MODEL_KEY}. */
 export const DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY = "lfm2-700m";
 
+export type TinyTitlePromptStyle = "chat-few-shot";
+
 export interface TinyTitleLocalModelSpec {
 	key: string;
 	repo: string;
@@ -10,6 +12,8 @@ export interface TinyTitleLocalModelSpec {
 	label: string;
 	description: string;
 	contextNote: string;
+	/** Tokenizer chat layout used for title generation. Defaults to the historical assistant prefill. */
+	titlePromptStyle?: TinyTitlePromptStyle;
 	/** Model family emits hidden reasoning unless the chat template disables it. */
 	reasoning?: boolean;
 	/** Reason this model is blocked before loading the ONNX runtime. */
@@ -17,6 +21,15 @@ export interface TinyTitleLocalModelSpec {
 }
 
 export const TINY_TITLE_LOCAL_MODELS = [
+	{
+		key: "lfm2.5-350m",
+		repo: "onnx-community/LFM2.5-350M-ONNX",
+		dtype: "q4",
+		label: "LFM2.5 350M",
+		description: "Current-generation compact Liquid model with a title-tuned chat prompt.",
+		contextNote: "Uses real chat examples instead of an assistant prefill for reliable short titles.",
+		titlePromptStyle: "chat-few-shot",
+	},
 	{
 		key: "lfm2-350m",
 		repo: "onnx-community/LFM2-350M-ONNX",
@@ -62,6 +75,7 @@ export const TINY_TITLE_LOCAL_MODELS = [
 
 export const TINY_TITLE_MODEL_VALUES = [
 	ONLINE_TINY_TITLE_MODEL_KEY,
+	"lfm2.5-350m",
 	"lfm2-350m",
 	"qwen3-0.6b",
 	"gemma-270m",

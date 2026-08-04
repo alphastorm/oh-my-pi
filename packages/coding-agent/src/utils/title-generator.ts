@@ -13,13 +13,13 @@ import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
-import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
 import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
+import { DEFAULT_TITLE_SYSTEM_PROMPT } from "../tiny/title-prompt";
 
-const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
+const TITLE_SYSTEM_PROMPT = DEFAULT_TITLE_SYSTEM_PROMPT;
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 
 const DEFAULT_TERMINAL_TITLE = "π";

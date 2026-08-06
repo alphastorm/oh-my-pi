@@ -293,6 +293,20 @@ describe("retain.execute", () => {
 		expect(registeredState?.retainQueue.depth).toBe(1);
 	});
 
+	it("rejects global scope instead of silently queueing it in Hindsight", async () => {
+		const settings = Settings.isolated({ "memory.backend": "hindsight" });
+		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
+		registerState(client, settings);
+
+		const tool = MemoryRetainTool.createIf(makeSession(settings))!;
+		await expect(
+			tool.execute("call-global", {
+				items: [{ content: "global preference", scope: "global" }],
+			}),
+		).rejects.toThrow(/only available with the Mnemopi backend/i);
+		expect(registeredState?.retainQueue.depth).toBe(0);
+	});
+
 	it("flushes a multi-item tool call as a single retainBatch call with per-item context", async () => {
 		const settings = Settings.isolated({ "memory.backend": "hindsight" });
 		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
@@ -412,6 +426,95 @@ describe("retain.execute (Mnemopi backend)", () => {
 		expect(text).toContain("fact one");
 		expect(text).toContain("fact two");
 		expect(text).toContain("fact three");
+	});
+
+	it("stores explicitly global items only in the shared bank", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const state = registerMnemopiState(
+			makeMnemopiConfig({
+				scoping: "per-project-tagged",
+				bank: "project-alpha",
+				globalBank: "default",
+				retainBank: "project-alpha",
+				recallBanks: ["project-alpha", "default"],
+			}),
+			{ cwd: "/work/project-alpha" },
+		);
+
+		const result = await MemoryRetainTool.createIf(makeSession(settings))!.execute("call-mnemopi-global", {
+			items: [{ content: "the user prefers zsh across projects", scope: "global" }],
+		});
+
+		expect(result.content[0]).toEqual({ type: "text", text: "1 memory stored." });
+		const projectRows = state.memory.beam.db.query("SELECT content FROM working_memory").all() as Array<{
+			content: string;
+		}>;
+		const globalRows = state.globalMemory?.beam.db.query("SELECT content FROM working_memory").all() as
+			| Array<{ content: string }>
+			| undefined;
+		expect(projectRows).toEqual([]);
+		expect(globalRows).toEqual([{ content: "the user prefers zsh across projects" }]);
+	});
+
+	it("stores global items in the retain bank when scoping is global", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const state = registerMnemopiState(
+			makeMnemopiConfig({
+				scoping: "global",
+				bank: "default",
+				globalBank: "default",
+				retainBank: "default",
+				recallBanks: ["default"],
+			}),
+		);
+
+		await MemoryRetainTool.createIf(makeSession(settings))!.execute("call-mnemopi-global-bank", {
+			items: [{ content: "the user prefers fish across projects", scope: "global" }],
+		});
+
+		expect(state.globalMemory).toBeUndefined();
+		expect(state.memory.beam.db.query("SELECT content FROM working_memory").all()).toEqual([
+			{ content: "the user prefers fish across projects" },
+		]);
+	});
+
+	it("rejects an unsupported global scope before storing earlier batch items", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const state = registerMnemopiState(
+			makeMnemopiConfig({
+				scoping: "per-project",
+				bank: "project-alpha",
+				retainBank: "project-alpha",
+				recallBanks: ["project-alpha"],
+			}),
+		);
+
+		await expect(
+			MemoryRetainTool.createIf(makeSession(settings))!.execute("call-mnemopi-unsupported-global", {
+				items: [{ content: "must remain unstored" }, { content: "global item", scope: "global" }],
+			}),
+		).rejects.toThrow(/requires global or per-project-tagged scoping/i);
+		expect(state.memory.beam.db.query("SELECT content FROM working_memory").all()).toEqual([]);
+	});
+
+	it("reports a global storage failure separately from unsupported scoping", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const state = registerMnemopiState(
+			makeMnemopiConfig({
+				scoping: "per-project-tagged",
+				bank: "project-alpha",
+				globalBank: "default",
+				retainBank: "project-alpha",
+				recallBanks: ["project-alpha", "default"],
+			}),
+		);
+		vi.spyOn(state, "rememberGlobal").mockReturnValue(undefined);
+
+		await expect(
+			MemoryRetainTool.createIf(makeSession(settings))!.execute("call-mnemopi-global-failure", {
+				items: [{ content: "global item", scope: "global" }],
+			}),
+		).rejects.toThrow("Mnemopi did not return a stored memory id for global scope.");
 	});
 
 	it("isolates memories between projects when scoping is per-project", async () => {
@@ -857,6 +960,34 @@ describe("Mnemopi backend lifecycle", () => {
 
 		expect(retainSpy).toHaveBeenCalledTimes(1);
 		expect(retainSpy).toHaveBeenCalledWith({ extract: false });
+
+		registeredMnemopiState = undefined;
+	});
+
+	it("does not retain the current session on dispose when auto-retain is disabled", async () => {
+		const config = makeMnemopiConfig({ autoRetain: false });
+		const state = registerMnemopiState(config, {
+			entries: () => [{ type: "message", message: { role: "user", content: "do not retain this turn" } }],
+		});
+		const dbPath = getMnemopiScopedDbPaths(config)[0];
+		const retainMemory = state.getScopedRetainTarget().memory;
+		const retainSpy = vi.spyOn(state, "forceRetainCurrentSession");
+		const flushSpy = vi.spyOn(retainMemory, "flushExtractions").mockResolvedValue();
+		const closeSpy = vi.spyOn(retainMemory, "close");
+
+		await state.dispose();
+
+		expect(retainSpy).not.toHaveBeenCalled();
+		expect(flushSpy).toHaveBeenCalledTimes(1);
+		expect(closeSpy).toHaveBeenCalledTimes(1);
+		const database = new Database(dbPath, { readonly: true });
+		try {
+			expect(
+				database.query("SELECT content FROM working_memory WHERE source = 'coding-agent-transcript'").all(),
+			).toEqual([]);
+		} finally {
+			database.close();
+		}
 
 		registeredMnemopiState = undefined;
 	});

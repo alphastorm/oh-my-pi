@@ -226,43 +226,24 @@ export function parseExtractedFactCategories(rawOutput: string | null | undefine
 		return emptyFactCategories();
 	}
 	const rawClean = stripFence(raw);
-	if (rawClean.startsWith("{")) {
-		try {
-			const parsed: unknown = JSON.parse(rawClean);
-			if (isRecord(parsed)) {
-				return {
-					facts: normalizeFactArray(parsed.facts, { fields: FACT_TEXT_FIELD_KEYS }),
-					instructions: normalizeFactArray(parsed.instructions, { fields: INSTRUCTION_TEXT_FIELD_KEYS }),
-					preferences: normalizeFactArray(parsed.preferences, { fields: PREFERENCE_TEXT_FIELD_KEYS }),
-					timelines: normalizeFactArray(parsed.timelines, { fields: TIMELINE_TEXT_FIELD_KEYS, joinFields: true }),
-					kg: normalizeKgArray(parsed.kg),
-				};
-			}
-		} catch {
-			const matches = [...raw.matchAll(/"([^"]{10,})"/g)].map(m => m[1]).filter((v): v is string => v !== undefined);
-			if (matches.length > 0) {
-				return {
-					...emptyFactCategories(),
-					facts: matches
-						.map(normalizeFact)
-						.filter(f => f !== "")
-						.slice(0, FLAT_FACT_LIMIT),
-				};
-			}
-		}
+	if (!rawClean.startsWith("{")) {
+		return emptyFactCategories();
 	}
-	const cleaned: string[] = [];
-	for (const line of raw.split("\n")) {
-		const fact = line.replace(/^[\s\d.\-*]+/, "").trim();
-		if (fact.length > 10) {
-			const normalized = normalizeFact(fact);
-			if (normalized !== "") {
-				cleaned.push(normalized);
-			}
+	try {
+		const parsed: unknown = JSON.parse(rawClean);
+		if (!isRecord(parsed)) {
+			return emptyFactCategories();
 		}
-		if (cleaned.length >= FLAT_FACT_LIMIT) break;
+		return {
+			facts: normalizeFactArray(parsed.facts, { fields: FACT_TEXT_FIELD_KEYS }),
+			instructions: normalizeFactArray(parsed.instructions, { fields: INSTRUCTION_TEXT_FIELD_KEYS }),
+			preferences: normalizeFactArray(parsed.preferences, { fields: PREFERENCE_TEXT_FIELD_KEYS }),
+			timelines: normalizeFactArray(parsed.timelines, { fields: TIMELINE_TEXT_FIELD_KEYS, joinFields: true }),
+			kg: normalizeKgArray(parsed.kg),
+		};
+	} catch {
+		return emptyFactCategories();
 	}
-	return { ...emptyFactCategories(), facts: cleaned };
 }
 
 /** Parse extractor output into the legacy flat string fact list. */
@@ -392,7 +373,7 @@ export async function extractFactCategories(
 				task: { kind: "memory-extraction", input: text },
 			});
 			if (typeof raw === "string" && raw.trim() !== "") {
-				const extracted = parseExtractedFactCategories(raw);
+				const extracted = parseExtractedFactCategories(cleanOutput(raw));
 				const count = countExtractedFactCategories(extracted);
 				if (count > 0) {
 					diag.recordSuccess("host", count);
@@ -415,7 +396,7 @@ export async function extractFactCategories(
 		if (attempted) {
 			diag.recordAttempt("host");
 			if (hostText !== null) {
-				const extracted = parseExtractedFactCategories(hostText);
+				const extracted = parseExtractedFactCategories(cleanOutput(hostText));
 				const count = countExtractedFactCategories(extracted);
 				if (count > 0) {
 					diag.recordSuccess("host", count);

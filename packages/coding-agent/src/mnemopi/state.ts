@@ -277,6 +277,10 @@ export class MnemopiSessionState {
 		return this.scoped.retain;
 	}
 
+	hasGlobalRetainTarget(): boolean {
+		return this.config.scoping === "global" || this.scoped.global !== undefined;
+	}
+
 	/**
 	 * Read counterpart to {@link editScopedMemory}: fetch a memory row by id
 	 * from any bank this session recalls from (retain, recall, global). First
@@ -453,6 +457,20 @@ export class MnemopiSessionState {
 		} catch (error) {
 			logger.warn("Mnemopi: retain failed", {
 				bank: this.scoped.retain.bank,
+				error: String(error),
+			});
+			return undefined;
+		}
+	}
+
+	rememberGlobal(memory: MnemopiRememberInput, options: MnemopiRememberOptions = {}): string | undefined {
+		const target = this.config.scoping === "global" ? this.scoped.retain : this.scoped.global;
+		if (!target) return undefined;
+		try {
+			return target.memory.remember(memory, options);
+		} catch (error) {
+			logger.warn("Mnemopi: global retain failed", {
+				bank: target.bank,
 				error: String(error),
 			});
 			return undefined;
@@ -648,9 +666,16 @@ export class MnemopiSessionState {
 	 * @param options.extract - When false, the retained transcript is stored but
 	 *  no LLM fact extraction is scheduled. Used on the interactive shutdown path
 	 *  so `dispose` does not block on a fresh LLM round-trip.
+	 * @param options.retainCurrentSession - When false, only drains already
+	 *  scheduled extraction work. Session shutdown uses this when auto-retain
+	 *  is disabled; explicit enqueue keeps the default retention behavior.
 	 */
-	async consolidate(options: { full?: boolean; extract?: boolean; sleep?: boolean } = {}): Promise<void> {
-		await this.forceRetainCurrentSession({ extract: options.extract });
+	async consolidate(
+		options: { full?: boolean; extract?: boolean; sleep?: boolean; retainCurrentSession?: boolean } = {},
+	): Promise<void> {
+		if (options.retainCurrentSession !== false) {
+			await this.forceRetainCurrentSession({ extract: options.extract });
+		}
 		for (const memory of this.scoped.owned) {
 			await memory.flushExtractions();
 			if (options.sleep === false) continue;
@@ -709,11 +734,14 @@ export class MnemopiSessionState {
 		const boundedTimeoutMs = timeoutMs !== undefined && timeoutMs > 0 ? timeoutMs : undefined;
 		const deadline = boundedTimeoutMs !== undefined ? performance.now() + boundedTimeoutMs : undefined;
 		if (boundedTimeoutMs !== undefined) this.#boundOwnedBusyTimeout(boundedTimeoutMs);
-		const consolidatePromise = this.consolidate({ full: false, extract: false, sleep: false }).catch(
-			(error: unknown) => {
-				logger.warn("Mnemopi: consolidation on dispose failed.", { error: String(error) });
-			},
-		);
+		const consolidatePromise = this.consolidate({
+			full: false,
+			extract: false,
+			sleep: false,
+			retainCurrentSession: this.config.autoRetain,
+		}).catch((error: unknown) => {
+			logger.warn("Mnemopi: consolidation on dispose failed.", { error: String(error) });
+		});
 		if (deadline !== undefined) {
 			const remainingMs = deadline - performance.now();
 			const completed =

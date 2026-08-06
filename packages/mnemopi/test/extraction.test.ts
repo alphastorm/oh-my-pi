@@ -38,7 +38,7 @@ afterEach(() => {
 });
 
 describe("structured extraction", () => {
-	it("builds prompts and parses JSON and legacy facts", () => {
+	it("builds prompts and parses structured JSON", () => {
 		const prompt = buildExtractionPrompt("I love coffee");
 		expect(prompt).toContain("I love coffee");
 		expect(prompt.toLowerCase()).toContain("extract");
@@ -47,11 +47,17 @@ describe("structured extraction", () => {
 			"The user likes coffee",
 			"The user prefers tea",
 		]);
-		expect(parseFacts("1. The user loves coffee\n- The user hates mornings")).toEqual([
-			"The user loves coffee",
-			"The user hates mornings",
-		]);
 		expect(parseFacts("NO_FACTS")).toEqual([]);
+	});
+
+	it("fails closed for prose and malformed structured output", () => {
+		expect(parseFacts("1. The user loves coffee\n- The user hates mornings")).toEqual([]);
+		expect(parseFacts('{"facts":["The user likes coffee"],"preferences":[not-json]}')).toEqual([]);
+		expect(
+			parseFacts(
+				"(Note: The response reflects a generalized interpretation of durable memory rather than a user preference.)",
+			),
+		).toEqual([]);
 	});
 
 	it("unwraps category-specific object facts and drops unrecognized objects", () => {
@@ -106,7 +112,7 @@ describe("structured extraction", () => {
 		setHostLlmBackend(
 			new CallableLlmBackend("fake", (_prompt, opts) => {
 				capturedTemperature = opts?.temperature ?? -1;
-				return "- Alex uses Neovim.\n- Alex dislikes VSCode.";
+				return '<think>Ignore this reasoning.</think>\n{"facts":["Alex uses Neovim","Alex dislikes VSCode"]}';
 			}),
 		);
 
@@ -141,12 +147,12 @@ describe("structured extraction", () => {
 		const resolved: ResolvedMnemopiRuntimeOptions = {
 			llm: {
 				enabled: true,
-				extractionPrompt: "ONLY-LINES for: {text}\nItems:",
+				extractionPrompt: "ONLY-JSON for: {text}\nJSON:",
 				complete: (prompt, opts) => {
 					capturedPrompt = prompt;
 					capturedTemperature = opts?.temperature ?? -1;
 					capturedTask = opts?.task;
-					return "Sam works at Globex\nSam prefers dark mode";
+					return '<think>Ignore this reasoning.</think>\n{"facts":["Sam works at Globex","Sam prefers dark mode"]}';
 				},
 			},
 		};
@@ -156,7 +162,7 @@ describe("structured extraction", () => {
 		);
 
 		expect(facts).toEqual(["Sam works at Globex", "Sam prefers dark mode"]);
-		expect(capturedPrompt).toContain("ONLY-LINES for: Sam works at Globex and prefers dark mode.");
+		expect(capturedPrompt).toContain("ONLY-JSON for: Sam works at Globex and prefers dark mode.");
 		expect(capturedTemperature).toBe(0);
 		expect(capturedTask).toEqual({
 			kind: "memory-extraction",

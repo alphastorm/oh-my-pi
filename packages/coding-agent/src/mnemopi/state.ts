@@ -282,6 +282,10 @@ export class MnemopiSessionState {
 		return this.scoped.retain;
 	}
 
+	hasGlobalRetainTarget(): boolean {
+		return this.config.scoping === "global" || this.scoped.global !== undefined;
+	}
+
 	/**
 	 * Read counterpart to {@link editScopedMemory}: fetch a memory row by id
 	 * from any bank this session recalls from (retain, recall, global). First
@@ -462,6 +466,20 @@ export class MnemopiSessionState {
 		} catch (error) {
 			logger.warn("Mnemopi: retain failed", {
 				bank: this.scoped.retain.bank,
+				error: String(error),
+			});
+			return undefined;
+		}
+	}
+
+	rememberGlobal(memory: MnemopiRememberInput, options: MnemopiRememberOptions = {}): string | undefined {
+		const target = this.config.scoping === "global" ? this.scoped.retain : this.scoped.global;
+		if (!target) return undefined;
+		try {
+			return target.memory.remember(memory, options);
+		} catch (error) {
+			logger.warn("Mnemopi: global retain failed", {
+				bank: target.bank,
 				error: String(error),
 			});
 			return undefined;

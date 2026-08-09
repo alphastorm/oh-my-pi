@@ -103,6 +103,49 @@ describe("AgentSession dispose releases retained memory", () => {
 		expect(current.rawSseDebugBuffer.snapshot().records).toHaveLength(0);
 	});
 
+	it("keeps retained session husks payload-free across repeated park cycles", async () => {
+		const retainedHusks: AgentSession[] = [];
+		const bulk = "p".repeat(16_384);
+
+		for (let cycle = 0; cycle < 24; cycle++) {
+			const current = createSession();
+			current.agent.replaceMessages([
+				{ role: "user", content: [{ type: "text", text: `${cycle}:${bulk}` }], timestamp: Date.now() },
+			]);
+			const appendOnlyContext = new AppendOnlyContextManager();
+			appendOnlyContext.syncMessages([{ role: "user", content: `${cycle}:${bulk}` }]);
+			current.agent.setAppendOnlyContext(appendOnlyContext);
+			current.sessionManager.appendMessage({
+				role: "user",
+				content: `${cycle}:${bulk}`,
+				timestamp: Date.now(),
+			});
+			current.rawSseDebugBuffer.recordEvent(
+				{
+					event: "content_block_delta",
+					data: `data: ${cycle}:${bulk}`,
+					raw: ["event: content_block_delta", `data: ${cycle}:${bulk}`],
+				},
+				current.agent.state.model,
+			);
+
+			await current.dispose();
+			session = undefined;
+			retainedHusks.push(current);
+
+			// Model lifecycle revivers retain every disposed AgentSession. The
+			// retained graph may grow by one lightweight husk per cycle, but its
+			// transcript-bearing containers must remain at a zero plateau.
+			for (const husk of retainedHusks) {
+				expect(husk.agent.state.messages).toHaveLength(0);
+				expect(husk.agent.appendOnlyContext).toBeUndefined();
+				expect(husk.sessionManager.getEntries()).toHaveLength(0);
+				expect(husk.rawSseDebugBuffer.toRawText()).toBe("");
+				expect(husk.rawSseDebugBuffer.snapshot().records).toHaveLength(0);
+			}
+		}
+	});
+
 	it("waits for the active turn to settle before releasing memory", async () => {
 		const current = createSession();
 		const bulk = "y".repeat(4096);

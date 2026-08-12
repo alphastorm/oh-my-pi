@@ -1,3 +1,4 @@
+import { dlopen, ptr } from "bun:ffi";
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -116,6 +117,46 @@ async function findLinuxPortHolder(port: number): Promise<PortHolder | null> {
 	return null;
 }
 
+function darwinProcessCommandLine(pid: number): string {
+	try {
+		const library = dlopen("/usr/lib/libSystem.B.dylib", {
+			sysctl: {
+				args: ["ptr", "u32", "ptr", "ptr", "ptr", "u64"],
+				returns: "i32",
+			},
+		});
+		try {
+			const sysctl = library.symbols.sysctl;
+			const mib = new Int32Array([1, 49, pid]);
+			const size = new BigUint64Array(1);
+			if (sysctl(ptr(mib), mib.length, 0, ptr(size), 0, 0) !== 0) return "";
+			if (size[0] === 0n || size[0] > 1024n * 1024n) return "";
+
+			const bytes = new Uint8Array(Number(size[0]));
+			if (sysctl(ptr(mib), mib.length, ptr(bytes), ptr(size), 0, 0) !== 0) return "";
+			const argc = new Int32Array(bytes.buffer, bytes.byteOffset, 1)[0] ?? 0;
+			if (argc <= 0) return "";
+
+			let cursor = Int32Array.BYTES_PER_ELEMENT;
+			while (cursor < bytes.length && bytes[cursor] !== 0) cursor++;
+			while (cursor < bytes.length && bytes[cursor] === 0) cursor++;
+			const decoder = new TextDecoder();
+			const arguments_: string[] = [];
+			for (let index = 0; index < argc && cursor < bytes.length; index++) {
+				let end = cursor;
+				while (end < bytes.length && bytes[end] !== 0) end++;
+				arguments_.push(decoder.decode(bytes.subarray(cursor, end)));
+				cursor = end + 1;
+			}
+			return arguments_.join(" ");
+		} finally {
+			library.close();
+		}
+	} catch {
+		return "";
+	}
+}
+
 async function findMacPortHolder(port: number): Promise<PortHolder | null> {
 	const lsof = $which("lsof") ?? ((await Bun.file("/usr/sbin/lsof").exists()) ? "/usr/sbin/lsof" : null);
 	if (!lsof) return null;
@@ -137,10 +178,7 @@ async function findMacPortHolder(port: number): Promise<PortHolder | null> {
 	}
 	if (pid === null) return null;
 
-	const ps = $which("ps");
-	if (!ps) return { pid, image, commandLine: "" };
-	const processInfo = await $`${ps} -ww -p ${pid} -o command=`.quiet().nothrow();
-	return { pid, image, commandLine: processInfo.exitCode === 0 ? processInfo.text().trim() : "" };
+	return { pid, image, commandLine: darwinProcessCommandLine(pid) };
 }
 
 async function findWindowsPortHolder(port: number): Promise<PortHolder | null> {

@@ -1,4 +1,10 @@
-import type { ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai";
+import {
+	type Model,
+	type ServiceTier,
+	type ServiceTierByFamily,
+	type ServiceTierFamily,
+	serviceTierFamily,
+} from "@oh-my-pi/pi-ai";
 import type { SubmenuOption } from "./settings-schema";
 
 /**
@@ -63,6 +69,29 @@ export const SERVICE_TIER_INHERIT_SETTING_VALUES = [
 ] as const;
 
 export type ServiceTierInheritSettingValue = (typeof SERVICE_TIER_INHERIT_SETTING_VALUES)[number];
+
+/** Whether a runtime value is valid for an inherit-capable service-tier setting. */
+export function isServiceTierInheritSettingValue(value: unknown): value is ServiceTierInheritSettingValue {
+	return typeof value === "string" && SERVICE_TIER_INHERIT_SETTING_VALUES.some(serviceTier => serviceTier === value);
+}
+
+/**
+ * Validate the sparse exact-agent-name tier map used by task dispatch.
+ *
+ * Unknown agent names are intentionally accepted and remain inert, matching
+ * the other task.agent* records. Invalid values fail settings loading.
+ */
+export function validateAgentTierOverrides(value: unknown): Record<string, ServiceTierInheritSettingValue> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	for (const [agentName, setting] of Object.entries(value)) {
+		if (!isServiceTierInheritSettingValue(setting)) {
+			throw new Error(
+				`Invalid service tier for task.agentTierOverrides.${agentName}: ${String(setting)}. Expected one of: ${SERVICE_TIER_INHERIT_SETTING_VALUES.join(", ")}.`,
+			);
+		}
+	}
+	return value as Record<string, ServiceTierInheritSettingValue>;
+}
 
 export const SERVICE_TIER_OPENAI_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierOpenAISettingValue>> = [
 	{ value: "none", label: "None", description: "Omit service_tier (standard processing)" },
@@ -143,4 +172,25 @@ export function serviceTierForAllFamilies(tier: ServiceTier | undefined): Servic
 export function resolveSubagentServiceTier(setting: string, inherited: ServiceTierByFamily): ServiceTierByFamily {
 	if (setting === "inherit") return inherited;
 	return serviceTierForAllFamilies(serviceTierSettingToTier(setting));
+}
+
+/**
+ * Resolve one exact-agent override after the effective model is known.
+ *
+ * Concrete tiers populate only that model's provider family. The resulting
+ * child map therefore survives same-family fallbacks without leaking onto a
+ * later cross-family fallback. `inherit` deliberately preserves the parent's
+ * complete live map so `/fast` changes are reflected on the next spawn.
+ */
+export function resolveAgentServiceTierOverride(
+	setting: ServiceTierInheritSettingValue,
+	model: Model | undefined,
+	inherited: ServiceTierByFamily,
+): ServiceTierByFamily {
+	if (setting === "inherit") return inherited;
+	const tier = serviceTierSettingToTier(setting);
+	if (!tier || !model) return {};
+	const family = serviceTierFamily(model);
+	if (!family || !isServiceTierForFamily(family, tier)) return {};
+	return { [family]: tier };
 }

@@ -208,6 +208,14 @@ For task dispatch, model precedence is:
 
 Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
 
+Service-tier precedence is independent of model selection: an exact, case-sensitive
+`task.agentTierOverrides[agentName]` entry overrides `tier.subagent`; an absent entry preserves
+the global behavior. `inherit` snapshots the parent session's live per-family tiers (including
+`/fast` changes) for the next spawn. Concrete values populate only the resolved model's provider
+family, so same-family fallbacks retain the tier and cross-family fallbacks do not inherit it.
+Service tiers are configuration-only; agent frontmatter and the task/eval wire formats do not
+expose a tier field.
+
 Runtime output schema precedence is:
 
 1. the task item's explicit `outputSchema`

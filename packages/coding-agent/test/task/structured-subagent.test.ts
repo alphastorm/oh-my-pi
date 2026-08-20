@@ -196,6 +196,35 @@ describe("structured subagent primitive", () => {
 		}
 	});
 
+	it("reloads persisted per-agent tier overrides before each launch", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-tier-reload-"));
+		const projectDir = path.join(root, "project");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
+		await fs.mkdir(agentDir, { recursive: true });
+		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const liveSession = {
+			...session(),
+			cwd: projectDir,
+			settings: liveSettings,
+		} as ToolSession;
+		mockDiscovery({ ...AGENT, name: "scout" });
+		const configPath = path.join(agentDir, "config.yml");
+
+		try {
+			await Bun.write(configPath, "task:\n  agentTierOverrides:\n    scout: priority\n");
+			await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "scout" }));
+			expect(liveSettings.get("task.agentTierOverrides")).toEqual({ scout: "priority" });
+
+			await Bun.write(configPath, "task:\n  agentTierOverrides:\n    scout: none\n");
+			await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "scout" }));
+			expect(liveSettings.get("task.agentTierOverrides")).toEqual({ scout: "none" });
+		} finally {
+			liveSettings.cancelPendingSaves();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
 		mockDiscovery(customAgent);

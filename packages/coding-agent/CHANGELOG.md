@@ -405,6 +405,7 @@
 ### Added
 
 - Added `lfm2.5-350m` as a local `providers.tinyModel` option for session titles
+- `task.agentTierOverrides` for sparse exact-name service-tier overrides on task/eval agents, so selected agents can use priority/Fast mode without accelerating every subagent.
 
 ## [18.0.0] - 2026-08-22
 

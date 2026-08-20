@@ -25,7 +25,12 @@ import {
 	resolveModelOverrideWithAuthFallback,
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
-import { buildServiceTierByFamily, resolveSubagentServiceTier } from "../config/service-tier";
+import {
+	buildServiceTierByFamily,
+	resolveAgentServiceTierOverride,
+	resolveSubagentServiceTier,
+	validateAgentTierOverrides,
+} from "../config/service-tier";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
@@ -940,6 +945,19 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 	});
 }
 
+function inheritedSubagentServiceTiers(
+	baseSettings: Settings,
+	inheritedServiceTier?: ServiceTierByFamily | null,
+): ServiceTierByFamily {
+	return inheritedServiceTier === undefined
+		? buildServiceTierByFamily(
+				baseSettings.get("tier.openai"),
+				baseSettings.get("tier.anthropic"),
+				baseSettings.get("tier.google"),
+			)
+		: (inheritedServiceTier ?? {});
+}
+
 export function createSubagentSettings(
 	baseSettings: Settings,
 	overrides?: Partial<Record<SettingPath, unknown>>,
@@ -953,14 +971,7 @@ export function createSubagentSettings(
 	// match the parent's live tiers when a live session supplied them, else the
 	// subagent's own configured tier.* settings). The result is stamped back onto
 	// the snapshot so createAgentSession's tier.* reads pick it up.
-	const inheritedTiers =
-		inheritedServiceTier === undefined
-			? buildServiceTierByFamily(
-					baseSettings.get("tier.openai"),
-					baseSettings.get("tier.anthropic"),
-					baseSettings.get("tier.google"),
-				)
-			: (inheritedServiceTier ?? {});
+	const inheritedTiers = inheritedSubagentServiceTiers(baseSettings, inheritedServiceTier);
 	const subagentTiers = resolveSubagentServiceTier(baseSettings.get("tier.subagent"), inheritedTiers);
 	snapshot["tier.openai"] = subagentTiers.openai ?? "none";
 	snapshot["tier.anthropic"] = subagentTiers.anthropic ?? "none";
@@ -985,6 +996,35 @@ export function createSubagentSettings(
 		},
 		{ storage: baseSettings.getStorage() },
 	);
+}
+
+/**
+ * Apply an exact-name task.agentTierOverrides entry after model resolution.
+ *
+ * Missing entries are a strict no-op, preserving the tier.subagent snapshot.
+ * Concrete entries stamp only the selected model's provider family.
+ */
+export function applyAgentTierOverride(
+	subagentSettings: Settings,
+	baseSettings: Settings,
+	agentName: string,
+	model: Model | undefined,
+	inheritedServiceTier?: ServiceTierByFamily | null,
+): boolean {
+	const overrides = validateAgentTierOverrides(baseSettings.get("task.agentTierOverrides"));
+	if (!Object.hasOwn(overrides, agentName)) return false;
+	const tiers = resolveAgentServiceTierOverride(
+		overrides[agentName],
+		model,
+		inheritedSubagentServiceTiers(baseSettings, inheritedServiceTier),
+	);
+	subagentSettings.override("tier.openai", tiers.openai ?? "none");
+	subagentSettings.override("tier.anthropic", tiers.anthropic === "priority" ? "priority" : "none");
+	subagentSettings.override(
+		"tier.google",
+		tiers.google === "flex" || tiers.google === "priority" ? tiers.google : "none",
+	);
+	return true;
 }
 
 export type AbortReason = "signal" | "shutdown" | "terminate" | "timeout" | "budget";
@@ -3050,6 +3090,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					resolvedModel: model.id,
 				});
 			}
+			applyAgentTierOverride(subagentSettings, settings, agent.name, model, options.parentServiceTier);
 			const retryFallbackRole = installSubagentRetryFallbackChain({
 				settings: subagentSettings,
 				id,

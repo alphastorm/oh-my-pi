@@ -87,12 +87,13 @@ export class InternalUrlRouter {
 	 * MCP resource fallback. MCP resources may use arbitrary custom schemes and
 	 * may be opaque (`urn:example:document`) rather than hierarchical.
 	 */
-	canResolve(input: string): boolean {
+	canResolve(input: string, context?: ResolveContext): boolean {
 		const scheme = extractUriScheme(input);
 		if (!scheme) return false;
 		// Registered handlers only accept the hierarchical `scheme://` form;
 		// opaque inputs reach the MCP resource fallback alone.
 		if (this.#handlers.has(scheme)) return this.canHandle(input);
+		if (context?.mcpEnabled === false) return false;
 		return this.#isMcpResourceScheme(scheme);
 	}
 
@@ -136,6 +137,13 @@ export class InternalUrlRouter {
 
 	/** Resolve an internal URL through its registered protocol handler. */
 	async resolve(input: string, context?: ResolveContext): Promise<InternalResource> {
+		const scheme = extractUriScheme(input);
+		if (
+			context?.mcpEnabled === false &&
+			(scheme === "mcp" || (scheme !== undefined && !this.#handlers.has(scheme)))
+		) {
+			throw new Error("MCP resources are disabled in this session.");
+		}
 		const { parsed, handler } = this.#route(input, true);
 		const resource = await handler.resolve(parsed, context);
 		return { ...resource, immutable: resource.immutable ?? handler.immutable };

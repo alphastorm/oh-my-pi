@@ -782,6 +782,7 @@ async function resolveInternalSearchInputs(opts: {
 	resolvedPaths: string[];
 	cwd: string;
 	settings: unknown;
+	mcpEnabled: boolean;
 	signal?: AbortSignal;
 	archiveDisplayMap: ReadonlyMap<string, string>;
 	localProtocolOptions?: LocalProtocolOptions;
@@ -803,6 +804,7 @@ async function resolveInternalSearchInputs(opts: {
 	const context: ResolveContext = {
 		cwd: opts.cwd,
 		settings: opts.settings,
+		mcpEnabled: opts.mcpEnabled,
 		signal: opts.signal,
 		sessionFile: opts.sessionFile,
 		sessionId: opts.sessionId,
@@ -1019,6 +1021,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					cwd: this.session.cwd,
 					archiveDisplayMap,
 					settings: this.session.settings,
+					mcpEnabled: this.session.enableMCP !== false,
 					signal,
 					localProtocolOptions: this.session.localProtocolOptions,
 					skills: this.session.skills,
@@ -1068,6 +1071,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						cwd: this.session.cwd,
 						internalUrlAction: "search",
 						settings: this.session.settings,
+						mcpEnabled: this.session.enableMCP !== false,
+						signal,
 						localProtocolOptions: this.session.localProtocolOptions,
 						skills: this.session.skills,
 						rules: this.session.activeRules,

@@ -10,11 +10,13 @@ function agentByName(agents: AgentDefinition[], name: string): AgentDefinition {
 }
 
 describe("task agent capability descriptions", () => {
-	it("classifies bundled scout as the only read-only delegated agent", () => {
+	it("classifies bundled read-only agents from their declared allowlists", () => {
 		const agents = loadBundledAgents();
 
-		expect(isReadOnlyAgent(agentByName(agents, "scout"))).toBe(true);
-		for (const name of ["task", "sonic", "reviewer"]) {
+		for (const name of ["scout", "reviewer", "security-reviewer"]) {
+			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(true);
+		}
+		for (const name of ["task", "sonic"]) {
 			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(false);
 		}
 	});
@@ -30,6 +32,16 @@ describe("task agent capability descriptions", () => {
 
 		// Guard against over-correcting: the positive case must still hold.
 		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "yield"] })).toBe(true);
+	});
+
+	it("gives bundled reviewers only read-only analysis tools and yield", () => {
+		const agents = loadBundledAgents();
+		const expectedTools = ["read", "grep", "glob", "lsp", "ast_grep", "yield"];
+
+		expect(agentByName(agents, "reviewer").tools).toEqual(expectedTools);
+		expect(agentByName(agents, "security-reviewer").tools).toEqual(expectedTools);
+		expect(agentByName(agents, "reviewer").spawns).toBeUndefined();
+		expect(agentByName(agents, "security-reviewer").spawns).toBeUndefined();
 	});
 
 	it("disables read summarization for scout, leaves other agents summarizing", () => {

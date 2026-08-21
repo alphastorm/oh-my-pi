@@ -953,6 +953,8 @@ export interface BuildSystemPromptOptions {
 	browserEnabled?: boolean;
 	/** Include computer eval-prelude guidance and safety policy. Default: false. */
 	computerEnabled?: boolean;
+	/** Include MCP resource guidance. Default: true. */
+	mcpEnabled?: boolean;
 }
 
 /**
@@ -981,6 +983,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		securityEnabled: options.securityEnabled,
 		browserEnabled: options.browserEnabled,
 		computerEnabled: options.computerEnabled,
+		mcpEnabled: options.mcpEnabled,
 		toolNames,
 		tools: promptTools,
 	});
@@ -1762,6 +1765,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const restrictToolNames = options.restrictToolNames === true;
 	const enableLsp = options.enableLsp ?? !restrictToolNames;
 	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
+	const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+	const ircEnabled =
+		!restrictToolNames && options.enableIrc !== false && isIrcEnabled(settings, options.taskDepth ?? 0);
 	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
 	// Only the first top-level session in a process owns an AsyncJobManager.
 	// Subagents inherit the parent's manager via `AsyncJobManager.instance()`
@@ -1842,7 +1848,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			enableLsp,
 			lspReadOnly,
-			enableIrc: restrictToolNames ? false : options.enableIrc,
+			enableIrc: ircEnabled,
+			enableMCP,
 			restrictToolNames,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
@@ -2025,7 +2032,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 
 		// Restricted sessions cannot inherit or discover MCP capabilities.
-		const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
 		let mcpManager: MCPManager | undefined = enableMCP ? options.mcpManager : undefined;
 		toolSession.mcpManager = mcpManager;
 		toolSession.enableMCP = enableMCP;
@@ -3300,6 +3306,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				tools: promptTools,
 				toolNames,
 				directToolNames: rebuildOptions?.directToolNames,
+				mcpEnabled: enableMCP,
 				rules: rulebookRules,
 				alwaysApplyRules,
 				resolvedAppendSystemPrompt: appendPrompt,
@@ -3316,7 +3323,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					options.spawns ?? "*",
 				),
 				delegationBias: sessionDelegationBias(toolSession),
-				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
+				taskIrcEnabled: ircEnabled,
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
@@ -3434,6 +3441,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,
 			status: "running" as const,
+			history: { ircEnabled },
 		};
 		registeredAgentRef =
 			options.expectedAgentRef === undefined

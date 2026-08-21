@@ -3313,6 +3313,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
+	const restrictToolNames = options.restrictToolNames === true || agent.tools !== undefined;
 
 	// Add tools if specified
 	let toolNames: string[] | undefined;
@@ -3331,7 +3332,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// Restricted sessions must not widen their explicit host tool list with hub.
 	if (
 		toolNames &&
-		!options.restrictToolNames &&
+		!restrictToolNames &&
 		!toolNames.includes("hub") &&
 		(!isReadOnlyAgent(agent) || toolNames.includes("task"))
 	) {
@@ -3347,6 +3348,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// Inbound steering works without hub, but outbound IRC roster and peer coordination instructions
 	// require the hub tool to be available to this subagent.
 	const ircEnabled =
+		!restrictToolNames &&
 		options.enableIrc !== false &&
 		isIrcEnabled(subagentSettings, childDepth) &&
 		(toolNames === undefined || toolNames.includes("hub"));
@@ -3617,7 +3619,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 
-			const restrictToolNames = options.restrictToolNames === true;
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
 			const mcpManager = enableMCP ? options.mcpManager : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
@@ -3727,7 +3728,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					toolNames,
 					outputSchema,
 					outputSchemaMode: options.outputSchemaMode,
-					restrictToolNames: options.restrictToolNames,
+					restrictToolNames,
 					requireYieldTool: true,
 					contextFiles: options.contextFiles,
 					skills: options.skills,
@@ -3937,6 +3938,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
 				readOnly: isReadOnlyAgent(agent),
+				ircEnabled,
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
 				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,

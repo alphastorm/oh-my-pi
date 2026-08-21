@@ -7,10 +7,14 @@ import type { AgentDefinition } from "./types";
 // `hub` is deliberately absent: it declares `approval = hubApproval`, a
 // parameter-dependent function that returns "exec" for start/stop/restart,
 // process-stdin `send`, unrecognized ops and malformed params. Do not re-add it.
+//
+// `lsp` qualifies because restricted task-agent sessions force `lspReadOnly`,
+// which rejects its mutating actions.
 export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"read",
 	"grep",
 	"glob",
+	"lsp",
 	"web_search",
 	"ast_grep",
 	"yield",

@@ -56,6 +56,7 @@ export interface InternalUrlExpansionOptions {
 	sessionFile?: string;
 	sessionId?: string;
 	agentRegistry?: ResolveContext["agentRegistry"];
+	mcpEnabled?: boolean;
 	ensureLocalParentDirs?: boolean;
 	/** Resolve bare skill:// URIs to the skill base directory instead of the instruction file. */
 	skillUrlForDirectory?: boolean;
@@ -299,6 +300,7 @@ async function resolveInternalUrlToPath(
 	agentRegistry?: ResolveContext["agentRegistry"],
 	rules?: readonly Rule[],
 	skillUrlForDirectory?: boolean,
+	mcpEnabled?: boolean,
 ): Promise<string> {
 	const url = normalizeLocalScheme(rawUrl);
 	const scheme = extractScheme(url);
@@ -342,6 +344,7 @@ async function resolveInternalUrlToPath(
 	try {
 		resource = await internalRouter.resolve(url, {
 			cwd,
+			mcpEnabled,
 			pathOnly: true,
 			sessionFile,
 			sessionId,
@@ -397,6 +400,7 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
 				options.agentRegistry,
 				options.rules,
 				options.skillUrlForDirectory,
+				options.mcpEnabled,
 			);
 		} catch (error) {
 			// Containment violations fail closed: never hand the raw token to the

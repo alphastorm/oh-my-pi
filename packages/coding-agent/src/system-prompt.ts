@@ -655,6 +655,8 @@ export interface BuildSystemPromptOptions {
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
 	/** Whether the local memory://root summary is active. */
 	memoryRootEnabled?: boolean;
+	/** Whether the MCP resource namespace is available to this session. Default: true. */
+	mcpEnabled?: boolean;
 	/** Whether the read-only security:// resource namespace is active. */
 	securityEnabled?: boolean;
 	/** Whether the browser eval prelude is enabled for this session. */
@@ -761,6 +763,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		scoutAvailable = true,
 		delegationBias = "eager",
 		memoryRootEnabled = false,
+		mcpEnabled = true,
 		securityEnabled = false,
 		browserEnabled = false,
 		computerEnabled = false,
@@ -1067,6 +1070,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		taskIrcEnabled,
 		secretsEnabled,
 		hasMemoryRoot: memoryRootEnabled,
+		mcpEnabled,
 		securityEnabled,
 		browserEnabled,
 		computerEnabled,

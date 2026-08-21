@@ -275,7 +275,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
 	});
 
-	it("does not inject hub into read-only subagents", async () => {
+	it("does not widen a declared allowlist with hub or peer instructions", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 
@@ -298,9 +298,13 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(readOnlyResult.exitCode).toBe(0);
 		expect(writableResult.exitCode).toBe(0);
 		expect(spawningResult.exitCode).toBe(0);
+		// A declared `tools` list is exact: the host adds neither its always-on hub
+		// nor, for a spawning agent, anything beyond the task tool its spawn policy
+		// already grants. Upstream injects hub into every non-read-only child; this
+		// fork enforces the declaration instead.
 		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
-		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write", "hub"]);
-		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "hub"]);
+		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write"]);
+		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task"]);
 
 		const promptText = (index: number): string => {
 			const prompt = spy.mock.calls[index]?.[0]?.systemPrompt;
@@ -310,9 +314,10 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const readOnlyPrompt = promptText(0);
 		const writablePrompt = promptText(1);
 		const spawningPrompt = promptText(2);
+		// Peer instructions ride on hub, so an exact allowlist never receives them.
 		expect(readOnlyPrompt.includes("# Peers")).toBe(false);
-		expect(writablePrompt.includes("# Peers")).toBe(true);
-		expect(spawningPrompt.includes("# Peers")).toBe(true);
+		expect(writablePrompt.includes("# Peers")).toBe(false);
+		expect(spawningPrompt.includes("# Peers")).toBe(false);
 	});
 
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {
@@ -335,9 +340,9 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.parentTaskPrefix).toBe("ChildAgent");
 	});
 
-	it("removes MCP and fresh discovery sources for a restricted child", async () => {
+	it("projects a declared agent allowlist without inherited MCP or discovered capabilities", async () => {
 		const session = yieldEmittingSession();
-		const persistedInits: Array<{ restrictToolNames?: boolean; tools: string[] }> = [];
+		const persistedInits: Array<{ restrictToolNames?: boolean; ircEnabled?: boolean; tools: string[] }> = [];
 		vi.spyOn(session.sessionManager, "appendSessionInit").mockImplementation(init => {
 			persistedInits.push(init);
 			return "session-init";
@@ -355,13 +360,13 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const preloadedCustomToolPaths: ToolPathWithSource[] = [
 			{ path: "/hostile/tools/read.ts", source: { provider: "test", providerName: "Test", level: "project" } },
 		];
-		const getTools = vi.fn(() => [{ name: "read", label: "hostile/read" }]);
+		const getTools = vi.fn(() => [{ name: "mcp__screenpipe_search_content", label: "screenpipe/search_content" }]);
 		const mcpManager = { getTools } as unknown as MCPManager;
 
 		const result = await runSubprocess({
 			...baseOptions,
+			agent: { ...baseAgent, tools: ["read", "yield"] },
 			id: "restricted-child",
-			restrictToolNames: true,
 			mcpManager,
 			preloadedExtensionPaths,
 			preloadedPreparedExtensions,
@@ -373,6 +378,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(result.exitCode).toBe(0);
 		const forwarded = spy.mock.calls[0]?.[0];
 		expect(forwarded?.restrictToolNames).toBe(true);
+		expect(forwarded?.toolNames).toEqual(["read", "yield"]);
 		expect(forwarded?.enableMCP).toBe(false);
 		expect(forwarded?.mcpManager).toBeUndefined();
 		expect(forwarded?.customTools).toBeUndefined();
@@ -381,7 +387,11 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(getTools).not.toHaveBeenCalled();
 		expect(forwarded?.outputSchemaMode).toBe("strict");
 		expect(persistedInits).toHaveLength(1);
-		expect(persistedInits[0]).toMatchObject({ restrictToolNames: true, tools: ["read", "yield"] });
+		expect(persistedInits[0]).toMatchObject({
+			restrictToolNames: true,
+			ircEnabled: false,
+			tools: ["read", "yield"],
+		});
 	});
 
 	it("persists bridge-only tools in the enabled Code Mode set", async () => {

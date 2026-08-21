@@ -1075,6 +1075,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
 			agentRegistry: this.session.agentRegistry,
 			rules: this.session.activeRules,
+			mcpEnabled: this.session.enableMCP !== false,
 			localOptions: {
 				getArtifactsDir: this.session.getArtifactsDir,
 				getSessionId: this.session.getSessionId,

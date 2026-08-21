@@ -265,6 +265,11 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 		// Diagnostics can be batch or single-file - queries all applicable servers
 		if (action === "diagnostics") {
+			if (file === "*" && this.session.lspReadOnly) {
+				throw new ToolError(
+					"Workspace diagnostics are disabled in this read-only session; request diagnostics for a specific file.",
+				);
+			}
 			if (file === "*") {
 				// `*` => run workspace diagnostics across all configured servers
 				const result = await runWorkspaceDiagnostics(this.session.cwd, signal);

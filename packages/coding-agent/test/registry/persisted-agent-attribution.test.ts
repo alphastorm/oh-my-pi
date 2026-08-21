@@ -68,6 +68,24 @@ async function historyFor(dir: string, id: string, records: string[]): Promise<A
 }
 
 describe("persisted agent model attribution", () => {
+	it("infers inbound IRC denial from a persisted restricted-session marker", async () => {
+		using tempDir = TempDir.createSync("@omp-restricted-irc-history-");
+		const registry = await historyFor(tempDir.path(), "Restricted", [
+			JSON.stringify({ type: "session", id: "s0", parentId: null, timestamp: "2026-08-07T10:34:37.300Z" }),
+			JSON.stringify({
+				type: "session_init",
+				id: "si",
+				parentId: "s0",
+				timestamp: "2026-08-07T10:34:38.000Z",
+				agent: "reviewer",
+				task: "review",
+				restrictToolNames: true,
+			}),
+		]);
+
+		expect(registry.get("Restricted")?.history?.ircEnabled).toBe(false);
+	});
+
 	it("reports the model that produced output, not a fallback that never served", async () => {
 		using tempDir = TempDir.createSync("@omp-attribution-incident-");
 		// The incident: sonnet does the work, a chain candidate errors instantly.

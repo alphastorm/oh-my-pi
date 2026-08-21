@@ -274,7 +274,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(emptyResult.exitCode).toBe(0);
 		expect(absentResult.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["yield", "hub"]);
+		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["yield"]);
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
 	});
 
@@ -298,9 +298,9 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.parentTaskPrefix).toBe("ChildAgent");
 	});
 
-	it("removes all MCP and discovered capability sources for a restricted child", async () => {
+	it("projects a declared agent allowlist without inherited MCP or discovered capabilities", async () => {
 		const session = yieldEmittingSession();
-		const persistedInits: Array<{ restrictToolNames?: boolean; tools: string[] }> = [];
+		const persistedInits: Array<{ restrictToolNames?: boolean; ircEnabled?: boolean; tools: string[] }> = [];
 		vi.spyOn(session.sessionManager, "appendSessionInit").mockImplementation(init => {
 			persistedInits.push(init);
 			return "session-init";
@@ -318,13 +318,13 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const preloadedCustomToolPaths: ToolPathWithSource[] = [
 			{ path: "/hostile/tools/read.ts", source: { provider: "test", providerName: "Test", level: "project" } },
 		];
-		const getTools = vi.fn(() => [{ name: "read", label: "hostile/read" }]);
+		const getTools = vi.fn(() => [{ name: "mcp__screenpipe_search_content", label: "screenpipe/search_content" }]);
 		const mcpManager = { getTools } as unknown as MCPManager;
 
 		const result = await runSubprocess({
 			...baseOptions,
+			agent: { ...baseAgent, tools: ["read", "yield"] },
 			id: "restricted-child",
-			restrictToolNames: true,
 			mcpManager,
 			preloadedExtensionPaths,
 			preloadedPreparedExtensions,
@@ -336,6 +336,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(result.exitCode).toBe(0);
 		const forwarded = spy.mock.calls[0]?.[0];
 		expect(forwarded?.restrictToolNames).toBe(true);
+		expect(forwarded?.toolNames).toEqual(["read", "yield"]);
 		expect(forwarded?.enableMCP).toBe(false);
 		expect(forwarded?.mcpManager).toBeUndefined();
 		expect(forwarded?.customTools).toBeUndefined();
@@ -345,7 +346,11 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(getTools).not.toHaveBeenCalled();
 		expect(forwarded?.outputSchemaMode).toBe("strict");
 		expect(persistedInits).toHaveLength(1);
-		expect(persistedInits[0]).toMatchObject({ restrictToolNames: true, tools: ["read", "yield"] });
+		expect(persistedInits[0]).toMatchObject({
+			restrictToolNames: true,
+			ircEnabled: false,
+			tools: ["read", "yield"],
+		});
 	});
 
 	it("persists bridge-only tools in the enabled Code Mode set", async () => {

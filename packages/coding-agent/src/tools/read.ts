@@ -1147,14 +1147,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		// Handle native OMP URLs and custom-scheme resources advertised by MCP servers.
 		const internalRouter = InternalUrlRouter.instance();
-		const delimitedInternalResult = internalRouter.canResolve(readPath)
-			? await this.#tryReadDelimitedPaths(readPath, signal, entry => internalRouter.canResolve(entry))
+		const internalResolveContext = { mcpEnabled: this.session.enableMCP !== false };
+		const delimitedInternalResult = internalRouter.canResolve(readPath, internalResolveContext)
+			? await this.#tryReadDelimitedPaths(readPath, signal, entry =>
+					internalRouter.canResolve(entry, internalResolveContext),
+				)
 			: null;
 		if (delimitedInternalResult) return delimitedInternalResult;
 
 		// Peel malformed selectors through the internal-URL-aware parser before routing.
 		let promotedSelector: string | undefined;
-		if (internalRouter.canResolve(readPath)) {
+		if (internalRouter.canResolve(readPath, internalResolveContext)) {
 			const internalTarget = splitInternalUrlSel(readPath);
 			const parsed = parseSel(internalTarget.sel);
 			if (internalTarget.sel !== undefined && parsed.kind === "none") {
@@ -2216,6 +2219,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const resource = await internalRouter.resolve(url, {
 			cwd: this.session.cwd,
 			settings: this.session.settings,
+			mcpEnabled: this.session.enableMCP !== false,
 			signal,
 			sessionFile: this.session.getSessionFile() ?? undefined,
 			localProtocolOptions: this.session.localProtocolOptions,

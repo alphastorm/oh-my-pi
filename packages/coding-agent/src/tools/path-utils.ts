@@ -1430,6 +1430,8 @@ export interface ToolScopeOptions {
 	multipathStatHint?: string;
 	/** Calling session's settings — forwarded to the internal-URL router so caller-aware handlers (issue://, pr://) honor it. */
 	settings?: unknown;
+	/** Whether the calling session may resolve MCP-backed resources. */
+	mcpEnabled?: boolean;
 	/** Caller's abort signal — forwarded to the internal-URL router. */
 	signal?: AbortSignal;
 	/** Calling session's `local://` root mapping — pins resolutions to the calling session. */
@@ -1524,6 +1526,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		const resource = await internalRouter.resolve(rawPath, {
 			cwd,
 			settings: opts.settings,
+			mcpEnabled: opts.mcpEnabled,
 			signal: opts.signal,
 			sessionFile: opts.sessionFile,
 			localProtocolOptions: opts.localProtocolOptions,

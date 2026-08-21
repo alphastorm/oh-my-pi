@@ -223,6 +223,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					const resource = await internalRouter.resolve(memoryGlob.baseUrl, {
 						cwd: this.session.cwd,
 						settings: this.session.settings,
+						mcpEnabled: this.session.enableMCP !== false,
 						signal,
 						sessionFile: this.session.getSessionFile() ?? undefined,
 						localProtocolOptions: this.session.localProtocolOptions,
@@ -240,6 +241,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				const resource = await internalRouter.resolve(rawPattern, {
 					cwd: this.session.cwd,
 					settings: this.session.settings,
+					mcpEnabled: this.session.enableMCP !== false,
 					signal,
 					sessionFile: this.session.getSessionFile() ?? undefined,
 					localProtocolOptions: this.session.localProtocolOptions,

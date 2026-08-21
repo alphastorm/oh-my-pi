@@ -148,6 +148,24 @@ describe("structured subagent primitive", () => {
 		}
 	});
 
+	it("rejects ambient grandchildren from a restricted parent", async () => {
+		mockDiscovery({ ...AGENT, tools: undefined });
+		const restrictedSession = session();
+		restrictedSession.restrictToolNames = true;
+
+		await expect(resolveEffectiveSubagentPolicy(request({ session: restrictedSession }))).rejects.toThrow(
+			'cannot spawn "worker" without a declared tool allowlist',
+		);
+	});
+
+	it("rejects MCP tool names that restricted Task-agent sessions cannot register", async () => {
+		mockDiscovery({ ...AGENT, tools: ["read", "mcp__screenpipe_search_content"] });
+
+		await expect(resolveEffectiveSubagentPolicy(request())).rejects.toThrow(
+			"declares MCP tools (mcp__screenpipe_search_content), which are unsupported",
+		);
+	});
+
 	it("attenuates plan-mode agents and rejects mutable isolation controls before discovery", async () => {
 		mockDiscovery();
 		const policy = await resolveEffectiveSubagentPolicy(

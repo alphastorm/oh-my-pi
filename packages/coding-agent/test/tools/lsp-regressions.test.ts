@@ -1895,6 +1895,24 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("rejects workspace diagnostics before spawning project checkers in read-only sessions", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-read-only-workspace-");
+		const spawnCalls: BunSpawnCall[] = [];
+		recordBunSpawn(spawnCalls);
+
+		try {
+			const session = makeLspSession(tempDir.path());
+			session.lspReadOnly = true;
+			const tool = new LspTool(session);
+			await expect(
+				tool.execute("read-only-workspace-diagnostics", { action: "diagnostics", file: "*" }),
+			).rejects.toThrow("Workspace diagnostics are disabled in this read-only session");
+			expect(spawnCalls).toEqual([]);
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
 	it("treats a go.work-only root as a Go workspace for workspace diagnostics", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-go-work-only-");
 		const spawnCalls: BunSpawnCall[] = [];

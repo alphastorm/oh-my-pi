@@ -61,6 +61,8 @@ export interface AgentHistorySummary {
 	resolvedModelIsFallback?: boolean;
 	metrics?: AgentMetricsSummary;
 	readOnly?: boolean;
+	/** Whether this agent accepts inbound IRC delivery and lifecycle revival for messaging. */
+	ircEnabled?: boolean;
 	/** Durable task output artifact, when the executor wrote one. */
 	outputPath?: string;
 	/** Captured isolated-worktree patch, when patch capture succeeded. */

@@ -333,6 +333,12 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 						typeof record.modelRole === "string" ? record.modelRole : (history.modelRole ?? inferred.modelRole),
 					resolvedModel: typeof record.resolvedModel === "string" ? record.resolvedModel : history.resolvedModel,
 					readOnly: typeof record.readOnly === "boolean" ? record.readOnly : inferred.readOnly,
+					ircEnabled:
+						typeof record.ircEnabled === "boolean"
+							? record.ircEnabled
+							: record.restrictToolNames === true
+								? false
+								: history.ircEnabled,
 				};
 				return false;
 			},

@@ -212,6 +212,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 				cwd: this.session.cwd,
 				internalUrlAction: "search",
 				settings: this.session.settings,
+				mcpEnabled: this.session.enableMCP !== false,
 				signal,
 				sessionFile: this.session.getSessionFile() ?? undefined,
 				localProtocolOptions: this.session.localProtocolOptions,

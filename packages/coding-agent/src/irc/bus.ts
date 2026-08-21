@@ -142,6 +142,13 @@ export class IrcBus {
 				error: `Agent "${message.to}" is a read-only advisor transcript and cannot be messaged.`,
 			};
 		}
+		if (ref.history?.ircEnabled === false) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: `Agent "${message.to}" does not accept IRC messages.`,
+			};
+		}
 
 		// A `parked` recipient always needs the lifecycle to revive it — this is
 		// read from *this* bus's registry, so it holds for any registry. The

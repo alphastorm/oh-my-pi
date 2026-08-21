@@ -100,6 +100,8 @@ export interface ResolveContext {
 	sessionFile?: string;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */
 	settings?: unknown;
+	/** Whether the calling session may access MCP-backed resources. `false` fails closed before global manager lookup. */
+	mcpEnabled?: boolean;
 	/** Caller's abort signal. */
 	signal?: AbortSignal;
 	/**

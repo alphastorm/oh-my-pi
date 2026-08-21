@@ -91,6 +91,18 @@ describe("parseAgentFields", () => {
 		expect(parseAgentFields({ name: "quiet", description: "desc" })?.tools).toBeUndefined();
 	});
 
+	test("preserves every explicit empty tool declaration as yield only", () => {
+		for (const tools of [[], "", " , ", [null, 42], null]) {
+			const fields = parseAgentFields({
+				name: "reviewer",
+				description: "desc",
+				tools,
+			});
+
+			expect(fields?.tools).toEqual(["yield"]);
+		}
+	});
+
 	test("maps legacy search and find tool names", () => {
 		const fields = parseAgentFields({
 			name: "reviewer",

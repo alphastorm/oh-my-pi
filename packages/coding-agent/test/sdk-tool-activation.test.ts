@@ -2074,6 +2074,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(restricted.getXdevToolEntries()).toEqual([]);
 			expect(restricted.systemPrompt.join("\n")).not.toContain("private-server");
 			expect(restricted.systemPrompt.join("\n")).not.toContain("MCP Server Instructions");
+			expect(restricted.systemPrompt.join("\n")).not.toContain("mcp://");
 		} finally {
 			await restricted.dispose();
 		}
@@ -2085,6 +2086,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			customTools: [sdkCustomTool],
 			toolNames: ["read", "generate_image"],
 			requireYieldTool: true,
+			enableMCP: true,
 			restrictToolNames: false,
 		});
 
@@ -2113,6 +2115,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					"reflect",
 				]),
 			);
+			expect(normal.systemPrompt.join("\n")).toContain("mcp://");
 		} finally {
 			await normal.dispose();
 		}

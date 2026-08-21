@@ -66,7 +66,9 @@ Most FS/bash tools auto-resolve these to FS paths.
 {{#if hasObsidian}}
 - `vault://<vault>/<path>`: Obsidian read/edit; `vault://`: vault list; `vault://_/…`: active vault. File `?op=outline|backlinks|links|tags|properties|tasks|base|…`; vault `?op=search&q=…|daily|tasks|orphans|unresolved|bases|…`.
 {{/if}}
+{{#if mcpEnabled}}
 - `mcp://<uri>`: MCP resource
+{{/if}}
 - `issue://<N>` / `issue://<owner>/<repo>/<N>`: GitHub issue; bare: recent; `?state=open|closed|all&limit=&author=&label=`.
 - `pr://<N>` / `pr://<owner>/<repo>/<N>`: same cache; bare: recent; `?comments=0` `?state=open|closed|merged|all&limit=&author=&label=`.
 - `omp://`: harness docs; AVOID unless user asks about harness.

@@ -261,8 +261,9 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		return null;
 	}
 
-	let tools =
-		Array.isArray(frontmatter.tools) && frontmatter.tools.length === 0 ? [] : parseArrayOrCSV(frontmatter.tools);
+	const hasExplicitTools = Object.hasOwn(frontmatter, "tools");
+	let tools = parseArrayOrCSV(frontmatter.tools);
+	if (hasExplicitTools && !tools) tools = [];
 	if (tools) tools = normalizeToolNames(tools);
 
 	// Subagents with explicit tool lists always need yield

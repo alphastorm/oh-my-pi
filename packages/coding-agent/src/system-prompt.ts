@@ -639,6 +639,8 @@ export interface BuildSystemPromptOptions {
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
 	/** Whether the local memory://root summary is active. */
 	memoryRootEnabled?: boolean;
+	/** Whether the MCP resource namespace is available to this session. Default: true. */
+	mcpEnabled?: boolean;
 	/** Whether the read-only security:// resource namespace is active. */
 	securityEnabled?: boolean;
 	/** Active model identifier (e.g. "anthropic/claude-opus-4") used by prompt policy and optionally surfaced. */
@@ -710,6 +712,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		workspaceTree: providedWorkspaceTree,
 		scoutAvailable = true,
 		memoryRootEnabled = false,
+		mcpEnabled = true,
 		securityEnabled = false,
 		model,
 		includeModelInPrompt = true,
@@ -1005,6 +1008,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		taskIrcEnabled,
 		secretsEnabled,
 		hasMemoryRoot: memoryRootEnabled,
+		mcpEnabled,
 		securityEnabled,
 		hasObsidian: hasObsidian(),
 		includeWorkspaceTree,

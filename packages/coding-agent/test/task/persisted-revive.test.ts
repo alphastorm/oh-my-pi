@@ -233,6 +233,27 @@ describe("persisted subagent revival", () => {
 		expect(activeToolNames).toEqual([["read", "write", "yield"]]);
 	});
 
+	it("cold-revives persisted LSP only when the restricted allowlist declares it", async () => {
+		const cwd = makeTempDir("@pi-restricted-lsp-revive-");
+		const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, {
+			tools: ["read", "lsp", "yield"],
+		});
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.restrictToolNames).toBe(true);
+		expect(capturedOptions?.enableLsp).toBe(true);
+		expect(capturedOptions?.toolNames).toEqual(["read", "lsp", "yield"]);
+	});
+
 	it("preserves normal revival capability wiring for contracts without the marker", async () => {
 		const cwd = makeTempDir("@pi-normal-revive-");
 		const sessionFile = await createPersistedSession(cwd);

@@ -18,6 +18,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "../thinking";
 import type { ToolSession } from "../tools";
+import { isMCPToolName } from "../tools/builtin-names";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -275,6 +276,19 @@ export async function resolveEffectiveSubagentPolicy(
 	}
 
 	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	if (request.session.restrictToolNames === true && effectiveAgent.tools === undefined) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`A restricted parent cannot spawn "${agentName}" without a declared tool allowlist.`,
+		);
+	}
+	const unsupportedMcpTools = effectiveAgent.tools?.filter(isMCPToolName) ?? [];
+	if (unsupportedMcpTools.length > 0) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Agent "${agentName}" declares MCP tools (${unsupportedMcpTools.join(", ")}), which are unsupported in restricted Task-agent sessions.`,
+		);
+	}
 	const schema = resolveSchema(request, effectiveAgent);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);

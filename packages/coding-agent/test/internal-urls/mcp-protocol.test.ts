@@ -1,10 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as os from "node:os";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { expandInternalUrls } from "@oh-my-pi/pi-coding-agent/tools/bash-skill-urls";
+import { GlobTool } from "@oh-my-pi/pi-coding-agent/tools/glob";
+import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
+import { resolveToolSearchScope } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 
 function createMockManager(opts: {
@@ -25,10 +29,11 @@ function createMockManager(opts: {
 	} as unknown as MCPManager;
 }
 
-function createToolSession(): ToolSession {
+function createToolSession(enableMCP = true): ToolSession {
 	return {
 		cwd: os.tmpdir(),
 		hasUI: false,
+		enableMCP,
 		settings: Settings.isolated(),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
@@ -49,6 +54,58 @@ describe("McpProtocolHandler", () => {
 	it("returns error when no MCP manager is available", async () => {
 		const router = InternalUrlRouter.instance();
 		await expect(router.resolve("mcp://test://resource")).rejects.toThrow("No MCP manager");
+	});
+
+	it("blocks restricted tool paths before consulting the process-global MCP manager", async () => {
+		const uri = "test://doc";
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("screenpipe", {
+			resources: [{ uri, name: "doc" }],
+			templates: [],
+		});
+		const manager = createMockManager({
+			servers: ["screenpipe"],
+			resources,
+			readResult: { contents: [{ uri, text: "private MCP content" }] },
+		});
+		const getConnectedServers = vi.spyOn(manager, "getConnectedServers");
+		MCPManager.setInstance(manager);
+		const router = InternalUrlRouter.instance();
+		const disabledContext = { mcpEnabled: false };
+
+		await expect(router.resolve(`mcp://${uri}`, disabledContext)).rejects.toThrow(
+			"MCP resources are disabled in this session",
+		);
+		await expect(router.resolve(uri, disabledContext)).rejects.toThrow("MCP resources are disabled in this session");
+
+		const restrictedSession = createToolSession(false);
+		await expect(new ReadTool(restrictedSession).execute("read-mcp", { path: `mcp://${uri}` })).rejects.toThrow(
+			"MCP resources are disabled in this session",
+		);
+		await expect(
+			new GrepTool(restrictedSession).execute("grep-mcp", { pattern: "private", path: `mcp://${uri}` }),
+		).rejects.toThrow("MCP resources are disabled in this session");
+		await expect(new GlobTool(restrictedSession).execute("glob-mcp", { path: `mcp://${uri}` })).rejects.toThrow(
+			"MCP resources are disabled in this session",
+		);
+		await expect(
+			resolveToolSearchScope({
+				rawPaths: [`mcp://${uri}`],
+				cwd: os.tmpdir(),
+				internalUrlAction: "search",
+				mcpEnabled: false,
+			}),
+		).rejects.toThrow("MCP resources are disabled in this session");
+		const command = `cat mcp://${uri}`;
+		expect(
+			await expandInternalUrls(command, {
+				skills: [],
+				internalRouter: router,
+				cwd: os.tmpdir(),
+				mcpEnabled: false,
+			}),
+		).toBe(command);
+		expect(getConnectedServers).not.toHaveBeenCalled();
 	});
 
 	it("requires resource URI in mcp URL", async () => {

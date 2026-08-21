@@ -1,12 +1,13 @@
 import type { AgentDefinition } from "./types";
 
-// Built-in tools whose approval tier is "read" (see tool classes' `approval`).
-// An agent is read-only iff its declared tools are a non-empty subset of this set.
-// Fail-safe: any unknown tool makes the agent not read-only.
+// Tools that are read-only under the restricted task-agent session policy.
+// LSP qualifies because restricted sessions force `lspReadOnly`, which rejects
+// its mutating actions. Any unknown tool fails the read-only classification.
 export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"read",
 	"grep",
 	"glob",
+	"lsp",
 	"web_search",
 	"ast_grep",
 	"yield",

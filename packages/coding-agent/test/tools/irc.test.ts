@@ -230,6 +230,35 @@ describe("IRC", () => {
 			expect(bus.unreadCount("0-Sub")).toBe(1);
 		});
 
+		it("rejects restricted recipients before lifecycle revival", async () => {
+			const sub = makeFakeSession();
+			let reviveCalls = 0;
+			registry.register({
+				id: "0-Restricted",
+				displayName: "reviewer",
+				kind: "sub",
+				session: null,
+				status: "parked",
+				history: { ircEnabled: false },
+			});
+			AgentLifecycleManager.global().adopt("0-Restricted", {
+				idleTtlMs: 0,
+				revive: async () => {
+					reviveCalls++;
+					return sub.session;
+				},
+			});
+
+			const receipt = await bus.send({ from: "0-Main", to: "0-Restricted", body: "wake up" });
+			expect(receipt).toEqual({
+				to: "0-Restricted",
+				outcome: "failed",
+				error: 'Agent "0-Restricted" does not accept IRC messages.',
+			});
+			expect(reviveCalls).toBe(0);
+			expect(sub.delivered).toEqual([]);
+		});
+
 		it("send revives a parked recipient through the lifecycle manager", async () => {
 			const sub = makeFakeSession();
 			sub.setOutcome("woken");

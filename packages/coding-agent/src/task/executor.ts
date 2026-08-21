@@ -2900,7 +2900,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
-	const ircEnabled = options.enableIrc !== false && isIrcEnabled(subagentSettings, childDepth);
+	const restrictToolNames = options.restrictToolNames === true || agent.tools !== undefined;
+	const ircEnabled = !restrictToolNames && options.enableIrc !== false && isIrcEnabled(subagentSettings, childDepth);
 
 	// Add tools if specified
 	let toolNames: string[] | undefined;
@@ -2917,7 +2918,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 	// Ordinary agents retain the host's always-on collaboration capability.
 	// Restricted sessions must not widen their explicit host tool list with hub.
-	if (toolNames && !options.restrictToolNames && !toolNames.includes("hub")) {
+	if (toolNames && !restrictToolNames && !toolNames.includes("hub")) {
 		toolNames = [...toolNames, "hub"];
 	}
 	if (toolNames?.includes("exec")) {
@@ -3176,7 +3177,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 
-			const restrictToolNames = options.restrictToolNames === true;
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
 			const mcpManager = enableMCP ? options.mcpManager : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
@@ -3281,7 +3281,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					toolNames,
 					outputSchema,
 					outputSchemaMode: options.outputSchemaMode,
-					restrictToolNames: options.restrictToolNames,
+					restrictToolNames,
 					requireYieldTool: true,
 					contextFiles: options.contextFiles,
 					skills: options.skills,
@@ -3459,6 +3459,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
 				readOnly: isReadOnlyAgent(agent),
+				ircEnabled,
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
 				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,

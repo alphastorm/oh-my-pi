@@ -277,6 +277,7 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
+import type { ExactCheckpointReceipt } from "./exact-checkpoint";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
@@ -343,7 +344,12 @@ import {
 	SessionMaintenance,
 	type SessionMaintenanceHost,
 } from "./session-maintenance";
-import { cleanupEmptyMoveSession, copySessionArtifacts, type SessionManager } from "./session-manager";
+import {
+	cleanupEmptyMoveSession,
+	copySessionArtifacts,
+	type CreateExactCheckpointOptions,
+	type SessionManager,
+} from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
@@ -4831,6 +4837,26 @@ export class AgentSession {
 	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
 		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
+	}
+
+	/**
+	 * Create a portable checkpoint only after the live turn and all session
+	 * maintenance have committed. Identity digests are supplied by the runtime
+	 * construction path that owns those authoritative inputs.
+	 */
+	createExactCheckpoint(options: Omit<CreateExactCheckpointOptions, "boundary">): Promise<ExactCheckpointReceipt> {
+		return this.sessionManager.createExactCheckpoint({
+			...options,
+			boundary: {
+				streaming: this.isStreaming,
+				committed:
+					!this.isStreaming &&
+					!this.isCompacting &&
+					!this.isGeneratingHandoff &&
+					!this.isRetrying &&
+					this.getLastAssistantMessage() !== undefined,
+			},
+		});
 	}
 
 	get isAborting(): boolean {

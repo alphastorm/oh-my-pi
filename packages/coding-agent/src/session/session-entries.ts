@@ -25,6 +25,20 @@ export interface SessionTitleSlotEntry {
 
 export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 
+export interface ExactCheckpointSessionMetadata {
+	/** Checkpoint consumed to create this local successor session. */
+	checkpointId: string;
+	/** Stable across resume, freshly minted for an explicit checkpoint fork. */
+	lineageId: string;
+	/** Set only when an explicit checkpoint fork starts a new lineage. */
+	parentLineageId?: string;
+	sourceSessionId: string;
+	mode: "resume" | "fork";
+	resumedAt: string;
+	compactionEpoch: number;
+	compactionTokensBefore: number;
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -44,6 +58,8 @@ export interface SessionHeader {
 	previousSessionFiles?: string[];
 	/** Provider prompt-cache identity inherited by exact-route full forks. */
 	providerPromptCacheKey?: string;
+	/** Portable exact-checkpoint parentage for a resumed local successor. */
+	exactCheckpoint?: ExactCheckpointSessionMetadata;
 }
 
 export interface NewSessionOptions {

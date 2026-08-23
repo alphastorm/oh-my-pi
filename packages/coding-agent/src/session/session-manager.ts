@@ -23,6 +23,17 @@ import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
 import {
+	consumeExactCheckpoint,
+	DEFAULT_EXACT_CHECKPOINT_TTL_MS,
+	type ExactCheckpointAuthority,
+	type ExactCheckpointReceipt,
+	type ExactCheckpointResumeMode,
+	ExactCheckpointError,
+	MAX_EXACT_CHECKPOINT_TTL_MS,
+	persistExactCheckpoint,
+	reserveExactCheckpointClaim,
+} from "./exact-checkpoint";
+import {
 	type BashExecutionMessage,
 	type CustomMessage,
 	type FileMentionMessage,
@@ -89,6 +100,37 @@ import {
 	normalizeWorkspaceDirectory,
 } from "./session-workspace";
 import { recordSessionTitle } from "./title-index";
+
+export interface CreateExactCheckpointOptions {
+	authority: ExactCheckpointAuthority;
+	checkpointPath?: string;
+	createdAt?: Date;
+	expiresAt?: Date;
+	ttlMs?: number;
+	/** Test seam for isolating boundary-change claims from the active profile. */
+	claimRoot?: string;
+	boundary: {
+		streaming: boolean;
+		committed: boolean;
+	};
+}
+
+export interface ResumeExactCheckpointOptions {
+	expectedIntegritySha256: string;
+	mode?: ExactCheckpointResumeMode;
+	sessionDir?: string;
+	now?: Date;
+	/** Test seam for isolating consume claims from the active profile. */
+	claimRoot?: string;
+}
+
+export interface ResumedExactCheckpoint {
+	sessionManager: SessionManager;
+	checkpointId: string;
+	parentLineageId: string | undefined;
+	successorLineageId: string;
+	mode: ExactCheckpointResumeMode;
+}
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
@@ -1680,6 +1722,94 @@ export class SessionManager {
 		await this.#rewriteAtomically();
 	}
 
+	/**
+	 * Persist the authoritative typed context as a portable exact checkpoint.
+	 * The caller owns the live-run state and must prove this is a committed,
+	 * non-streaming boundary; AgentSession supplies that proof directly.
+	 */
+	async createExactCheckpoint(options: CreateExactCheckpointOptions): Promise<ExactCheckpointReceipt> {
+		if (options.boundary.streaming) {
+			throw new ExactCheckpointError("mid_stream", "Cannot checkpoint a streaming turn");
+		}
+		if (!options.boundary.committed) {
+			throw new ExactCheckpointError("uncommitted", "Cannot checkpoint outside a committed turn boundary");
+		}
+		if (path.resolve(options.authority.workspaceRoot) !== path.resolve(this.#cwd)) {
+			throw new ExactCheckpointError(
+				"authority_mismatch",
+				"Checkpoint workspace does not match the active session",
+				["workspaceRoot"],
+			);
+		}
+		await this.flush();
+		const committedLeafId = this.#index.leafId();
+		const branch = this.getBranch();
+		const inherited = this.#header.exactCheckpoint;
+		const compactions = branch.filter((entry): entry is CompactionEntry => entry.type === "compaction");
+		const latestCompaction = compactions.at(-1);
+		const compaction = {
+			epoch: (inherited?.compactionEpoch ?? 0) + compactions.length,
+			tokensBefore: latestCompaction?.tokensBefore ?? inherited?.compactionTokensBefore ?? 0,
+		};
+		const checkpointId = Bun.randomUUIDv7();
+		const validationTime = new Date();
+		const createdAt = options.createdAt ?? validationTime;
+		const ttlMs = options.ttlMs ?? DEFAULT_EXACT_CHECKPOINT_TTL_MS;
+		if (!Number.isFinite(ttlMs) || ttlMs <= 0 || ttlMs > MAX_EXACT_CHECKPOINT_TTL_MS) {
+			throw new ExactCheckpointError(
+				"invalid_envelope",
+				`Checkpoint TTL must be positive and no greater than ${MAX_EXACT_CHECKPOINT_TTL_MS}ms`,
+			);
+		}
+		const expiresAt = options.expiresAt ?? new Date(createdAt.getTime() + ttlMs);
+		const checkpointPath =
+			options.checkpointPath ??
+			path.join(
+				this.#sessionDir,
+				"exact-checkpoints",
+				`${fileSafeTimestamp(createdAt.toISOString())}_${checkpointId}.json`,
+			);
+		const receipt = await persistExactCheckpoint({
+			checkpointPath,
+			checkpointId,
+			createdAt,
+			expiresAt,
+			sourceSessionId: this.#sessionId,
+			committedLeafId,
+			lineage: {
+				lineageId: inherited?.lineageId ?? this.#sessionId,
+				parentCheckpointId: inherited?.checkpointId,
+				parentLineageId: inherited?.parentLineageId,
+			},
+			authority: {
+				...options.authority,
+				workspaceRoot: path.resolve(options.authority.workspaceRoot),
+			},
+			compaction,
+			messages: this.buildSessionContext({ portable: true }).messages,
+			now: validationTime,
+		});
+		if (this.#index.leafId() !== committedLeafId) {
+			// Reserve the digest claim before removing the stale envelope. A
+			// consumer that won the same non-recursive mkdir keeps the envelope:
+			// this cleanup must never delete content whose claim it does not own.
+			let ownsClaim = false;
+			try {
+				await reserveExactCheckpointClaim(receipt.integritySha256, { claimRoot: options.claimRoot });
+				ownsClaim = true;
+			} catch (error) {
+				if (!(error instanceof ExactCheckpointError) || error.code !== "already_consumed") throw error;
+			}
+			if (ownsClaim) {
+				await fs.promises.unlink(checkpointPath).catch(error => {
+					if (!isEnoent(error)) throw error;
+				});
+			}
+			throw new ExactCheckpointError("boundary_changed", "Session changed while the checkpoint was being persisted");
+		}
+		return receipt;
+	}
+
 	/** Persist this session's transcript as a newly identified OMP session. */
 	async persistCopy(
 		options?: { sessionDir?: string; suppressBreadcrumb?: boolean },
@@ -2855,6 +2985,91 @@ export class SessionManager {
 			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
 		}
 		return manager;
+	}
+
+	/**
+	 * Consume a portable checkpoint into a fresh local session. Only typed
+	 * messages are replayed; provider continuation state is neither loaded nor
+	 * reconstructed. This intentionally uses file storage only.
+	 */
+	static async resumeExactCheckpoint(
+		checkpointPath: string,
+		authority: ExactCheckpointAuthority,
+		options: ResumeExactCheckpointOptions,
+	): Promise<ResumedExactCheckpoint> {
+		if (!(await directoryIsEnterable(authority.workspaceRoot))) {
+			throw new ExactCheckpointError("authority_mismatch", "Checkpoint workspace is not available", [
+				"workspaceRoot",
+			]);
+		}
+		const consumption = await consumeExactCheckpoint(checkpointPath, authority, {
+			expectedIntegritySha256: options.expectedIntegritySha256,
+			mode: options.mode,
+			now: options.now,
+			claimRoot: options.claimRoot,
+		});
+		const { envelope } = consumption;
+		const cwd = path.resolve(authority.workspaceRoot);
+		const storage = new FileSessionStorage();
+		const sessionDir = options.sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const manager = new SessionManager(cwd, sessionDir, true, storage);
+		const timestamp = consumption.consumedAt;
+		const sessionFile = path.join(
+			sessionDir,
+			`${fileSafeTimestamp(timestamp)}_${consumption.successorSessionId}.jsonl`,
+		);
+		manager.#resetToNewSession({ parentSession: envelope.sourceSessionId }, sessionFile);
+		manager.#sessionId = consumption.successorSessionId;
+		manager.#header.id = consumption.successorSessionId;
+		const parentLineageId =
+			consumption.mode === "fork" ? envelope.lineage.lineageId : envelope.lineage.parentLineageId;
+		manager.#header.exactCheckpoint = {
+			checkpointId: envelope.checkpointId,
+			lineageId: consumption.successorLineageId,
+			parentLineageId,
+			sourceSessionId: envelope.sourceSessionId,
+			mode: consumption.mode,
+			resumedAt: consumption.consumedAt,
+			compactionEpoch: envelope.compaction.epoch,
+			compactionTokensBefore: envelope.compaction.tokensBefore,
+		};
+
+		const modelEntry: ModelChangeEntry = {
+			type: "model_change",
+			...manager.#freshEntryFields(),
+			model: `${authority.provider}/${authority.model}`,
+			role: "default",
+		};
+		manager.#entries.push(modelEntry);
+		manager.#index.insert(modelEntry);
+		if (authority.accountWitness !== null) {
+			const credentialEntry: CredentialPinEntry = {
+				type: "credential_pin",
+				...manager.#freshEntryFields(),
+				provider: authority.provider,
+				hash: authority.accountWitness,
+			};
+			manager.#entries.push(credentialEntry);
+			manager.#index.insert(credentialEntry);
+		}
+		for (const message of envelope.messages) {
+			const entry: SessionMessageEntry = {
+				type: "message",
+				...manager.#freshEntryFields(),
+				message: structuredClone(message),
+			};
+			manager.#entries.push(entry);
+			manager.#index.insert(entry);
+		}
+		manager.#forceFileCreation = true;
+		await manager.#rewriteAtomically();
+		return {
+			sessionManager: manager,
+			checkpointId: envelope.checkpointId,
+			parentLineageId,
+			successorLineageId: consumption.successorLineageId,
+			mode: consumption.mode,
+		};
 	}
 
 	/**

@@ -391,11 +391,18 @@ import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";
+import {
+	TerminalReceiptAccumulator,
+	type TerminalReceipt,
+	type TerminalReceiptListener,
+	terminalReceiptStatus,
+} from "./terminal-receipt";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
+export * from "./terminal-receipt";
 export * from "./agent-session-types";
 export type { AdvisorStats, AdvisorStatusOverviewEntry, PerAdvisorStat } from "./session-advisors";
 
@@ -638,6 +645,8 @@ export class AgentSession {
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
+	#terminalReceiptListeners: TerminalReceiptListener[] = [];
+	#lastTerminalReceipt: TerminalReceipt | null = null;
 	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
@@ -757,6 +766,8 @@ export class AgentSession {
 	 */
 	#fallbackExtensionTimers: ManagedTimers | undefined = undefined;
 	#turnIndex = 0;
+	/** Accounting-only state retained across automatic continuations until the true terminal settle. */
+	#terminalReceiptAccumulator: TerminalReceiptAccumulator | undefined;
 	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
@@ -2585,6 +2596,13 @@ export class AgentSession {
 	#subscriberEmitGate: Promise<void> = Promise.resolve();
 
 	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
+		if (event.type === "retry_fallback_applied") {
+			this.#terminalReceiptAccumulator?.recordFallback({
+				from: event.from,
+				to: event.to,
+				role: event.role,
+			});
+		}
 		if (event.type === "tool_execution_update") {
 			// Returned background calls have no later tool result to persist their
 			// terminal frame. Keep the latest update for future focus rebuilds;
@@ -3057,6 +3075,48 @@ export class AgentSession {
 		return true;
 	}
 
+	#startTerminalReceipt(): void {
+		if (this.#terminalReceiptAccumulator) return;
+		this.#lastTerminalReceipt = null;
+		this.#terminalReceiptAccumulator = new TerminalReceiptAccumulator({
+			sessionId: this.sessionId,
+			turnId: Snowflake.next(),
+			startedAtMs: Date.now(),
+		});
+	}
+
+	async #emitTerminalReceipt(message: AssistantMessage | undefined): Promise<void> {
+		const accumulator = this.#terminalReceiptAccumulator;
+		if (!accumulator) return;
+		this.#terminalReceiptAccumulator = undefined;
+		const provider = message?.provider ?? this.model?.provider;
+		const receipt = accumulator.finish({
+			endedAtMs: Date.now(),
+			provider,
+			model: message?.model ?? this.model?.id,
+			accountIdentity: provider
+				? this.#modelRegistry.authStorage.getOAuthAccountIdentity(provider, this.sessionId)
+				: undefined,
+			promptCacheKey: this.agent.promptCacheKey,
+			toolNames: this.getActiveToolNames(),
+			xdevNames: this.getMountedXdevToolNames(),
+			compactionEpoch: this.sessionManager.getEntries().filter(entry => entry.type === "compaction").length,
+			terminalStatus: terminalReceiptStatus(message),
+		});
+		if (!receipt) return;
+		this.#lastTerminalReceipt = receipt;
+		const event = { type: "terminal_receipt", receipt } as const;
+		for (const listener of [...this.#terminalReceiptListeners]) {
+			try {
+				await listener(event);
+			} catch (error) {
+				logger.warn("Terminal receipt listener rejected", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+	}
+
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
 		const eventPromptGeneration = this.#promptGeneration;
 		// A fresh run supersedes the previously settled (and pruned) refusal
@@ -3065,6 +3125,7 @@ export class AgentSession {
 			this.#activeAgentPromptGeneration = eventPromptGeneration;
 			this.#prunedTerminalRefusal = undefined;
 			this.#advisors.onPrimaryAgentStart();
+			this.#startTerminalReceipt();
 			this.#emitRunState("running");
 			this.#maintenance.noteTurnStarted();
 		}
@@ -3092,6 +3153,7 @@ export class AgentSession {
 		// toolUse) assistant message and skipping settle-only work.
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
+			this.#terminalReceiptAccumulator?.recordAssistant(event.message);
 		}
 		// Expected internal transitions stamp a structural suppression flag on the
 		// persisted message BEFORE the obfuscator's display-side copy below, so the
@@ -3208,6 +3270,7 @@ export class AgentSession {
 
 		if (event.type === "tool_execution_start") {
 			this.#recordToolExecutionStart(event);
+			this.#terminalReceiptAccumulator?.recordToolStart(event.toolCallId, Date.now());
 		}
 
 		// Both buffer resets run before the awaited fan-out: event handlers run
@@ -3260,6 +3323,7 @@ export class AgentSession {
 			void this.#settleOwnedBrowserTabs();
 		}
 		if (event.type === "tool_execution_end") {
+			this.#terminalReceiptAccumulator?.recordToolEnd(event.toolCallId, Date.now());
 			if (event.toolName === "goal") {
 				await this.#goalRuntime.onGoalToolCompleted();
 			} else {
@@ -3432,8 +3496,10 @@ export class AgentSession {
 			// TTSR retry work runs concurrently and clears the live flag before
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
+			let terminalReceiptMessage: AssistantMessage | undefined;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
 				this.#emitRunState("idle");
+				if (!options?.willContinue) await this.#emitTerminalReceipt(terminalReceiptMessage);
 				// Public agent_end is held out of the eager display pass and emitted
 				// here after maintenance routing, tagged isTerminal so subscribers can
 				// tell final settles from scheduled continuations.
@@ -3467,10 +3533,12 @@ export class AgentSession {
 				return;
 			}
 
+			terminalReceiptMessage = msg;
 			const yieldOnThisMessage = this.#assistantEndedWithSuccessfulYield(msg);
 			const successfulYieldMessage = yieldOnThisMessage
 				? msg
 				: this.#findSuccessfulYieldAssistantMessage(settledMessages);
+			if (successfulYieldMessage) terminalReceiptMessage = successfulYieldMessage;
 
 			const maintenanceRoute = (route: string, extra?: Record<string, unknown>) => {
 				logger.debug("agent_end maintenance routing", {
@@ -3602,7 +3670,9 @@ export class AgentSession {
 			// Record quota exhaustion before deciding whether this failed turn may be
 			// replayed. Visible/side-effecting output then remains terminal while its
 			// credential is still blocked or rotated exactly once.
-			await this.#recovery.recordUsageLimitOutcome(msg);
+			if (await this.#recovery.recordUsageLimitOutcome(msg)) {
+				this.#terminalReceiptAccumulator?.recordAccountRotation();
+			}
 
 			let compactionResult = COMPACTION_CHECK_NONE;
 			let checkedCompaction = false;
@@ -4513,6 +4583,20 @@ export class AgentSession {
 		return () => this.#sessionChangeCallbacks.delete(callback);
 	}
 
+	/** Return the sanitized receipt from the most recently settled terminal turn. */
+	getLastTerminalReceipt(): TerminalReceipt | null {
+		return this.#lastTerminalReceipt;
+	}
+
+	/** Subscribe to sanitized terminal receipts without joining normal UI/RPC event fan-out. */
+	subscribeTerminalReceipts(listener: TerminalReceiptListener): () => void {
+		this.#terminalReceiptListeners.push(listener);
+		return () => {
+			const index = this.#terminalReceiptListeners.indexOf(listener);
+			if (index !== -1) this.#terminalReceiptListeners.splice(index, 1);
+		};
+	}
+
 	subscribeCommandMetadataChanged(listener: CommandMetadataChangedListener): () => void {
 		this.#commandMetadataChangedListeners.push(listener);
 		return () => {
@@ -4593,6 +4677,10 @@ export class AgentSession {
 			this.#observedSessionId = currentSessionId;
 		} else if (this.#observedSessionId !== currentSessionId) {
 			this.#observedSessionId = currentSessionId;
+			// Session-ID adoption ends any turn-scoped receipt accumulation from the
+			// previous logical session; the next agent_start opens a fresh receipt.
+			this.#terminalReceiptAccumulator = undefined;
+			this.#lastTerminalReceipt = null;
 			if (notifyChange) this.#notifySessionChangeCallbacks();
 		}
 		const sid = this.#activeProviderSessionId(sessionId);
@@ -4696,6 +4784,8 @@ export class AgentSession {
 			this.agent.prepareQueuedMessages = undefined;
 		}
 		clearVisionRequestDedupe(this.sessionId);
+		this.#terminalReceiptAccumulator = undefined;
+		this.#lastTerminalReceipt = null;
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();

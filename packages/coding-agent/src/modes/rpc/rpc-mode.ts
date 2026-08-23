@@ -1527,6 +1527,11 @@ export async function runRpcMode(
 				return success(id, "get_last_assistant_text", { text });
 			}
 
+			case "get_last_terminal_receipt": {
+				const receipt = session.getLastTerminalReceipt();
+				return success(id, "get_last_terminal_receipt", { receipt });
+			}
+
 			case "set_session_name": {
 				const name = command.name.trim();
 				if (!name) {

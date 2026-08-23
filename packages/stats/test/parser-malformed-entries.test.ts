@@ -157,6 +157,73 @@ describe("malformed session entries", () => {
 		expect(result.toolCalls.map(c => c.toolCallId)).toEqual(["call-1"]);
 	});
 
+	it("extracts exact request identity and lineage from an assistant entry after the title preamble", async () => {
+		const file = await writeSession([
+			JSON.stringify({ type: "title", v: 1, title: "" }),
+			JSON.stringify({ type: "session", version: 3, id: "session-after-title" }),
+			JSON.stringify({
+				type: "message",
+				id: "a1",
+				timestamp: "2026-07-12T00:00:00.000Z",
+				runtimeVariant: "code-mode",
+				message: {
+					role: "assistant",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-fable-5",
+					content: [],
+					stopReason: "stop",
+					usage: USAGE,
+					logicalTurnId: "turn-1",
+					runtimeRequestId: "request-1",
+					parentRuntimeRequestId: "parent-request-1",
+					attemptId: "attempt-1",
+					queueMs: 7,
+					estimatedContextTokens: 123,
+					inputTokenEstimator: "serialized-v1",
+					providerRequestClass: "small",
+				},
+			}),
+		]);
+
+		const result = await parseSessionFile(file);
+		expect(result.stats[0]).toMatchObject({
+			sessionId: "session-after-title",
+			runtimeVariant: "code-mode",
+			logicalTurnId: "turn-1",
+			runtimeRequestId: "request-1",
+			parentRuntimeRequestId: "parent-request-1",
+			attemptId: "attempt-1",
+			queueMs: 7,
+			estimatedContextTokens: 123,
+			inputTokenEstimator: "serialized-v1",
+			providerRequestClass: "small",
+		});
+	});
+
+	it("retains the session identity when incremental parsing starts after the header", async () => {
+		const sessionHeader = JSON.stringify({
+			type: "session",
+			version: 3,
+			id: "incremental-session",
+		});
+		const file = await writeSession([
+			sessionHeader,
+			assistantEntry("incremental-assistant", {
+				content: [],
+				stopReason: "stop",
+				usage: USAGE,
+				runtimeRequestId: "incremental-request",
+			}),
+		]);
+
+		const result = await parseSessionFile(file, Buffer.byteLength(`${sessionHeader}\n`));
+		expect(result.stats[0]).toMatchObject({
+			sessionId: "incremental-session",
+			runtimeRequestId: "incremental-request",
+		});
+	});
+
 	it("keeps tool_calls insertable when the turn lacks a message timestamp", async () => {
 		const file = await writeSession([
 			assistantEntry("a1", {

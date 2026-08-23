@@ -147,11 +147,45 @@ describe("agentLoop with AgentMessage", () => {
 		const [paused, final] = messages.slice(1) as AssistantMessage[];
 		expect(paused.content).toEqual([{ type: "text", text: "Scanning the repo first." }]);
 		expect(final.content).toEqual([{ type: "text", text: "All done." }]);
+		expect(paused.logicalTurnId).toEqual(expect.any(String));
+		expect(final.logicalTurnId).toBe(paused.logicalTurnId);
+		expect(paused.runtimeRequestId).toEqual(expect.any(String));
+		expect(final.runtimeRequestId).toEqual(expect.any(String));
+		expect(final.runtimeRequestId).not.toBe(paused.runtimeRequestId);
+		expect(paused.attemptId).toEqual(expect.any(String));
+		expect(final.attemptId).toEqual(expect.any(String));
+		expect(final.attemptId).not.toBe(paused.attemptId);
+		expect(paused.parentRuntimeRequestId).toBeUndefined();
+		expect(final.parentRuntimeRequestId).toBe(paused.runtimeRequestId);
 		// The follow-up request replayed the paused commentary, with no user or
 		// tool-result message appended in between.
 		expect(secondCallRoles).toEqual(["user", "assistant"]);
 		// One turn_start per sampling round: the continuation ran as a fresh turn.
 		expect(events.filter(e => e.type === "turn_start")).toHaveLength(2);
+	});
+
+	it("stamps pre-dispatch request telemetry onto every persisted assistant message", async () => {
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		const mock = createMockModel({ responses: [{ content: ["Hi there!"] }] });
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const stream = agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+		const assistant = messages.at(-1) as AssistantMessage;
+
+		// The stats parser and the Code Mode exact-telemetry health join read
+		// these four fields from persisted session messages; a message without
+		// them lands as an incomplete-telemetry stats row (the v17.2.3 owner-
+		// waived regression this contract test pins against).
+		expect(assistant.queueMs).toEqual(expect.any(Number));
+		expect(assistant.queueMs).toBeGreaterThanOrEqual(0);
+		expect(assistant.estimatedContextTokens).toEqual(expect.any(Number));
+		expect(assistant.estimatedContextTokens).toBeGreaterThan(0);
+		expect(assistant.inputTokenEstimator).toBe("serialized-v1");
+		expect(assistant.providerRequestClass).toBe("short");
 	});
 
 	it("caps consecutive pause_turn continuations", async () => {

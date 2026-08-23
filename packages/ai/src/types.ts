@@ -947,6 +947,22 @@ export interface AssistantMessage {
 	model: string;
 	contextSnapshot?: ContextSnapshot;
 	retryRecovery?: AssistantRetryRecovery;
+	/** Privacy-safe local identifier shared by every provider dispatch in one logical turn. */
+	logicalTurnId?: string;
+	/** Privacy-safe local identifier unique to this provider dispatch. */
+	runtimeRequestId?: string;
+	/** Privacy-safe local identifier unique to this concrete dispatch attempt. */
+	attemptId?: string;
+	/** Runtime request that caused this continuation or retry, when one exists. */
+	parentRuntimeRequestId?: string;
+	/** Local admission-to-dispatch wait in milliseconds measured by the runtime request loop. */
+	queueMs?: number;
+	/** Pre-dispatch estimate of total input tokens, when available. */
+	estimatedContextTokens?: number;
+	/** Version of the estimator used for `estimatedContextTokens`. */
+	inputTokenEstimator?: string;
+	/** Threshold class used for admission and scheduling. */
+	providerRequestClass?: string;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
 	/**
 	 * Name of the upstream provider an aggregator routed this request to, as

@@ -203,7 +203,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	sessionId?: string;
 	/** Optional account-scoped prompt-cache warmup gate for this request. */
 	providerPromptCacheGate?: ProviderPromptCacheGate;
-
+	/** Privacy-safe local identifier shared by every dispatch in this logical turn. */
+	logicalTurnId?: string;
+	/** Runtime request that caused this logical turn, when invoked as a continuation or retry. */
+	parentRuntimeRequestId?: string;
 
 	/** Absolute wall-clock deadline in Unix epoch milliseconds. */
 	deadline?: number;

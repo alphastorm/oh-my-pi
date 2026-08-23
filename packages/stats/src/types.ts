@@ -3,6 +3,9 @@ import type { AgentType } from "./shared-types";
 
 export * from "./shared-types";
 
+/** Runtime producer identity; historical rows remain explicitly unknown. */
+export type RuntimeVariant = "main" | "code-mode" | "unknown";
+
 /**
  * Extracted stats from an assistant message.
  */
@@ -11,6 +14,8 @@ export interface MessageStats {
 	id?: number;
 	/** Session file path */
 	sessionFile: string;
+	/** Canonical local session identifier from the session header. */
+	sessionId?: string | null;
 	/** Entry ID within the session */
 	entryId: string;
 	/** Folder/project path (extracted from session filename) */
@@ -27,6 +32,24 @@ export interface MessageStats {
 	duration: number | null;
 	/** Time to first token in milliseconds */
 	ttft: number | null;
+	/** Provider-reported queue time in milliseconds. */
+	queueMs?: number | null;
+	/** Pre-dispatch estimate of total input tokens. */
+	estimatedContextTokens?: number | null;
+	/** Runtime that produced this request; historical absence is unknown. */
+	runtimeVariant?: RuntimeVariant | null;
+	/** Privacy-safe local logical-turn correlation identifier. */
+	logicalTurnId?: string | null;
+	/** Privacy-safe local provider-dispatch correlation identifier. */
+	runtimeRequestId?: string | null;
+	/** Runtime request that caused this continuation or retry, when one exists. */
+	parentRuntimeRequestId?: string | null;
+	/** Privacy-safe local identifier unique to this concrete dispatch attempt. */
+	attemptId?: string | null;
+	/** Version of the estimator used for `estimatedContextTokens`. */
+	inputTokenEstimator?: string | null;
+	/** Threshold class used for admission and scheduling. */
+	providerRequestClass?: string | null;
 	/** Stop reason */
 	stopReason: StopReason;
 	/** Error message if stopReason is error */
@@ -65,6 +88,7 @@ export interface SessionMessageEntry {
 	parentId: string | null;
 	timestamp: string;
 	message: AssistantMessage | { role: "user" | "toolResult" };
+	runtimeVariant?: Exclude<RuntimeVariant, "unknown">;
 }
 
 export interface SessionServiceTierChangeEntry {

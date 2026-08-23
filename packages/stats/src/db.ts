@@ -26,6 +26,7 @@ import type {
 	ProviderAggregate,
 	ProviderHourlyPoint,
 	ProviderTimeSeriesPoint,
+	RuntimeVariant,
 	TimeSeriesPoint,
 	ToolCallStats,
 	ToolModelStats,
@@ -126,6 +127,7 @@ const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v1";
 // reach the inclusive 200K tier. A one-time full re-parse repairs them through
 // the cost-refreshing UPSERT in `insertMessageStats`.
 const COST_REINGEST_BACKFILL_KEY = "messages_cost_reingest_v1";
+const REQUEST_TELEMETRY_BACKFILL_KEY = "request_telemetry_v2";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -154,6 +156,7 @@ export async function initDb(): Promise<Database> {
 		CREATE TABLE IF NOT EXISTS messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			session_file TEXT NOT NULL,
+			session_id TEXT,
 			entry_id TEXT NOT NULL,
 			folder TEXT NOT NULL,
 			model TEXT NOT NULL,
@@ -162,6 +165,15 @@ export async function initDb(): Promise<Database> {
 			timestamp INTEGER NOT NULL,
 			duration INTEGER,
 			ttft INTEGER,
+			queue_ms INTEGER,
+			estimated_context_tokens INTEGER,
+			runtime_variant TEXT,
+			logical_turn_id TEXT,
+			runtime_request_id TEXT,
+			parent_runtime_request_id TEXT,
+			attempt_id TEXT,
+			input_token_estimator TEXT,
+			provider_request_class TEXT,
 			stop_reason TEXT NOT NULL,
 			error_message TEXT,
 			input_tokens INTEGER NOT NULL,
@@ -251,6 +263,49 @@ export async function initDb(): Promise<Database> {
 		db.run("ALTER TABLE messages ADD COLUMN cost_no_cache_input REAL");
 	}
 	db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
+	// The sentinel is versioned independently from the table. In particular,
+	// request_telemetry_v1 may already be complete while these v2 lineage
+	// columns are absent, so a missing v2 sentinel re-enrolls every pre-existing
+	// messages table and resets its session offsets exactly once.
+	const telemetryColumnDefinitions: ReadonlyArray<readonly [string, string]> = [
+		["session_id", "TEXT"],
+		["queue_ms", "INTEGER"],
+		["estimated_context_tokens", "INTEGER"],
+		["runtime_variant", "TEXT"],
+		["logical_turn_id", "TEXT"],
+		["runtime_request_id", "TEXT"],
+		["parent_runtime_request_id", "TEXT"],
+		["attempt_id", "TEXT"],
+		["input_token_estimator", "TEXT"],
+		["provider_request_class", "TEXT"],
+	];
+	const telemetrySentinel = db.prepare("SELECT value FROM meta WHERE key = ?").get(REQUEST_TELEMETRY_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	const needsTelemetryEnrollment =
+		messagesTableExisted &&
+		(telemetrySentinel === undefined ||
+			telemetryColumnDefinitions.some(([name]) => !messageColumns.some(column => column.name === name)));
+	if (needsTelemetryEnrollment) {
+		const migrateTelemetry = db.transaction(() => {
+			for (const [name, type] of telemetryColumnDefinitions) {
+				if (!messageColumns.some(column => column.name === name)) {
+					db!.run(`ALTER TABLE messages ADD COLUMN ${name} ${type}`);
+				}
+			}
+			db!.run("DELETE FROM file_offsets");
+			db!
+				.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+				.run(REQUEST_TELEMETRY_BACKFILL_KEY, BACKFILL_PENDING);
+		});
+		migrateTelemetry();
+	} else if (!messagesTableExisted) {
+		db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(
+			REQUEST_TELEMETRY_BACKFILL_KEY,
+			BACKFILL_COMPLETE,
+		);
+	}
+	db.run("CREATE INDEX IF NOT EXISTS idx_messages_timestamp_runtime_variant ON messages(timestamp, runtime_variant)");
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
 	// from its transcript path. A brand-new table gets the column from CREATE
 	// TABLE and the parser labels rows at insert time; a pre-existing table gets
@@ -526,18 +581,31 @@ export function insertMessageStats(stats: MessageStats[]): number {
 
 	const stmt = db.prepare(`
 		INSERT INTO messages (
-			session_file, entry_id, folder, model, provider, api, timestamp,
-			duration, ttft, stop_reason, error_message,
+			session_file, session_id, entry_id, folder, model, provider, api, timestamp,
+			duration, ttft, queue_ms, estimated_context_tokens,
+			runtime_variant, logical_turn_id, runtime_request_id, parent_runtime_request_id, attempt_id,
+			input_token_estimator, provider_request_class,
+			stop_reason, error_message,
 			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
 			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, cost_no_cache_input, agent_type
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE NOT EXISTS (
 			SELECT 1 FROM messages
 			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
 		)
 		ON CONFLICT(session_file, entry_id) DO UPDATE SET
 			premium_requests = MAX(messages.premium_requests, excluded.premium_requests),
+			queue_ms = COALESCE(excluded.queue_ms, messages.queue_ms),
+			estimated_context_tokens = COALESCE(excluded.estimated_context_tokens, messages.estimated_context_tokens),
+			runtime_variant = COALESCE(excluded.runtime_variant, messages.runtime_variant),
+			session_id = COALESCE(excluded.session_id, messages.session_id),
+			logical_turn_id = COALESCE(excluded.logical_turn_id, messages.logical_turn_id),
+			runtime_request_id = COALESCE(excluded.runtime_request_id, messages.runtime_request_id),
+			parent_runtime_request_id = COALESCE(excluded.parent_runtime_request_id, messages.parent_runtime_request_id),
+			attempt_id = COALESCE(excluded.attempt_id, messages.attempt_id),
+			input_token_estimator = COALESCE(excluded.input_token_estimator, messages.input_token_estimator),
+			provider_request_class = COALESCE(excluded.provider_request_class, messages.provider_request_class),
 			cost_input = excluded.cost_input,
 			cost_output = excluded.cost_output,
 			cost_cache_read = excluded.cost_cache_read,
@@ -553,6 +621,7 @@ export function insertMessageStats(stats: MessageStats[]): number {
 			const noCacheInputCost = calculateNoCacheInputCost(s.provider, s.model, s.usage) ?? 0;
 			const result = stmt.run(
 				s.sessionFile,
+				s.sessionId ?? null,
 				s.entryId,
 				s.folder,
 				s.model,
@@ -561,6 +630,15 @@ export function insertMessageStats(stats: MessageStats[]): number {
 				s.timestamp,
 				s.duration,
 				s.ttft,
+				s.queueMs ?? null,
+				s.estimatedContextTokens ?? null,
+				s.runtimeVariant === "unknown" ? null : (s.runtimeVariant ?? null),
+				s.logicalTurnId ?? null,
+				s.runtimeRequestId ?? null,
+				s.parentRuntimeRequestId ?? null,
+				s.attemptId ?? null,
+				s.inputTokenEstimator ?? null,
+				s.providerRequestClass ?? null,
 				s.stopReason,
 				s.errorMessage,
 				s.usage.input,
@@ -1091,6 +1169,7 @@ function rowToMessageStats(row: any): MessageStats {
 	return {
 		id: row.id,
 		sessionFile: row.session_file,
+		sessionId: row.session_id ?? null,
 		entryId: row.entry_id,
 		folder: row.folder,
 		model: row.model,
@@ -1099,6 +1178,15 @@ function rowToMessageStats(row: any): MessageStats {
 		timestamp: row.timestamp,
 		duration: row.duration,
 		ttft: row.ttft,
+		queueMs: row.queue_ms ?? null,
+		estimatedContextTokens: row.estimated_context_tokens ?? null,
+		runtimeVariant: (row.runtime_variant ?? "unknown") as RuntimeVariant,
+		logicalTurnId: row.logical_turn_id ?? null,
+		runtimeRequestId: row.runtime_request_id ?? null,
+		parentRuntimeRequestId: row.parent_runtime_request_id ?? null,
+		attemptId: row.attempt_id ?? null,
+		inputTokenEstimator: row.input_token_estimator ?? null,
+		providerRequestClass: row.provider_request_class ?? null,
 		stopReason: row.stop_reason as any,
 		errorMessage: row.error_message,
 		usage: {
@@ -1415,6 +1503,7 @@ export function markSessionBackfillsComplete(): void {
 			USER_MESSAGE_LINKS_REPAIR_KEY,
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
 			COST_REINGEST_BACKFILL_KEY,
+			REQUEST_TELEMETRY_BACKFILL_KEY,
 		]) {
 			markComplete.run(key, BACKFILL_COMPLETE);
 		}

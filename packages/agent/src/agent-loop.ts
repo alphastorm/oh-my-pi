@@ -2,7 +2,7 @@
  * Agent loop that works with AgentMessage throughout.
  * Transforms to Message[] only at the LLM call boundary.
  */
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 
 import {
 	type AssistantMessage,
@@ -25,7 +25,6 @@ import {
 	toolWireSchema,
 	validateToolArguments,
 } from "@oh-my-pi/pi-ai";
-import { resolveCacheRetention } from "@oh-my-pi/pi-ai/utils";
 import {
 	type Dialect,
 	encodeInbandToolHistory,
@@ -34,6 +33,7 @@ import {
 	wrapInbandToolStream,
 } from "@oh-my-pi/pi-ai/dialect";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { resolveCacheRetention } from "@oh-my-pi/pi-ai/utils";
 import {
 	type CursorExecResolvedCarrier,
 	copyCursorExecResolved,
@@ -52,6 +52,7 @@ import {
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
+import { Tokenizer } from "./tokenizer";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import {
 	type AgentTelemetry,
@@ -91,6 +92,74 @@ import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, isSoftToolRequirement } fr
 import { yieldIfDue } from "./utils/yield";
 
 const PROMPT_CACHE_ACCOUNT_WITNESS_KEY = randomBytes(32);
+
+type RuntimeRequestIdentity = {
+	logicalTurnId: string;
+	runtimeRequestId: string;
+	attemptId: string;
+	parentRuntimeRequestId?: string;
+	/** Local admission-to-dispatch wait in milliseconds measured by the request loop. */
+	queueMs?: number;
+	/** Pre-dispatch input-token estimate over the serialized provider context. */
+	estimatedContextTokens?: number;
+	/** Version label of the estimator that produced `estimatedContextTokens`. */
+	inputTokenEstimator?: string;
+	/** Scheduling size class derived from the estimate ("short" | "long"). */
+	providerRequestClass?: string;
+};
+
+function stampRuntimeRequestIdentity(message: AssistantMessage, identity: RuntimeRequestIdentity): AssistantMessage {
+	return { ...message, ...identity };
+}
+
+/** Long-context boundary for the scheduling class stamped on persisted messages. */
+const LONG_CONTEXT_REQUEST_THRESHOLD_TOKENS = 131_072;
+const REQUEST_TOKENIZERS = new Map<Model["tokenizer"], Tokenizer>();
+
+function requestTokenizer(model: Model): Tokenizer {
+	let tokenizer = REQUEST_TOKENIZERS.get(model.tokenizer);
+	if (tokenizer === undefined) {
+		tokenizer = new Tokenizer(model);
+		REQUEST_TOKENIZERS.set(model.tokenizer, tokenizer);
+	}
+	return tokenizer;
+}
+
+/**
+ * Pre-dispatch request telemetry. Restores the session contract the v17.2.1
+ * line recorded through its provider-admission gate: the stats parser and
+ * Code Mode metrics read `queueMs`, `estimatedContextTokens`,
+ * `inputTokenEstimator`, and `providerRequestClass` from persisted assistant
+ * messages, and the exact-telemetry health join requires them non-null. The
+ * estimate serializes the outbound context through the model-scoped tokenizer:
+ * known families use their exact native encoding, PI_TOKENIZER_ACCURATE uses
+ * o200k for unknown families, and the default unknown-family path keeps the
+ * historical bytes/4 `serialized-v1` estimate.
+ */
+function estimateRequestContextTokens(llmContext: Context, model: Model): {
+	estimatedContextTokens: number;
+	inputTokenEstimator: string;
+	providerRequestClass: string;
+} {
+	const serialized = JSON.stringify({
+		systemPrompt: llmContext.systemPrompt ?? null,
+		messages: llmContext.messages,
+		tools: llmContext.tools ?? null,
+	});
+	const estimatedContextTokens = requestTokenizer(model).countTokens(serialized);
+	const accurate = process.env.PI_TOKENIZER_ACCURATE === "1" && process.env.NODE_ENV !== "test";
+	const modelTokenizer = process.env.NODE_ENV === "test" ? undefined : model.tokenizer;
+	return {
+		estimatedContextTokens,
+		inputTokenEstimator: modelTokenizer
+			? `serialized-${modelTokenizer}-v1`
+			: accurate
+				? "serialized-o200k-v1"
+				: "serialized-v1",
+		providerRequestClass:
+			estimatedContextTokens >= LONG_CONTEXT_REQUEST_THRESHOLD_TOKENS ? "long" : "short",
+	};
+}
 
 /** Stop-details marker for a provider error after assistant content/tool args already streamed. */
 export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_after_content";
@@ -1055,6 +1124,8 @@ async function runLoopBody(
 		let harmonyRetryAttempt = 0;
 		let harmonyTruncateResumeCount = 0;
 		let pausedTurnContinuations = 0;
+		const logicalTurnId = config.logicalTurnId ?? randomUUID();
+		let parentRuntimeRequestId = config.parentRuntimeRequestId;
 
 		// Soft tool requirement lifecycle (reminder then escalation; see SoftToolRequirement).
 		// The host-owned state survives only a gate stop between Agent.prompt calls.
@@ -1203,16 +1274,20 @@ async function runLoopBody(
 						telemetry,
 						invokeAgentSpan,
 						stepCounter,
+						logicalTurnId,
 						streamFn,
 						harmonyRetryAttempt,
 						hostToolChoice,
 						softRequirementState.forcedToolChoice,
 						preparedProviderCall,
+						parentRuntimeRequestId,
 					);
+					if (message.runtimeRequestId) parentRuntimeRequestId = message.runtimeRequestId;
 					harmonyRetryAttempt = 0;
 					harmonyTruncateResumeCount = 0;
 				} catch (err) {
 					if (!(err instanceof HarmonyLeakInterruption)) throw err;
+					parentRuntimeRequestId = preparedProviderCall.runtimeRequestId;
 					if (err.recovered) {
 						if (harmonyTruncateResumeCount >= 2) {
 							await emitHarmonyAudit(config, err, "escalated", harmonyRetryAttempt);
@@ -1529,6 +1604,7 @@ interface PreparedProviderCall {
 	context: Context;
 	promptToolWireTools: Context["tools"];
 	ownedDialect: Dialect | undefined;
+	runtimeRequestId: string;
 }
 
 async function prepareProviderCall(
@@ -1577,7 +1653,7 @@ async function prepareProviderCall(
 			tools: undefined,
 		};
 	}
-	return { model, context: llmContext, promptToolWireTools, ownedDialect };
+	return { model, context: llmContext, promptToolWireTools, ownedDialect, runtimeRequestId: randomUUID() };
 }
 
 /**
@@ -1592,14 +1668,27 @@ async function streamAssistantResponse(
 	telemetry: AgentTelemetry | undefined,
 	invokeAgentSpan: Span | undefined,
 	stepCounter: StepCounter,
+	logicalTurnId: string,
 	streamFn?: StreamFn,
 	harmonyRetryAttempt = 0,
 	hostToolChoice?: ToolChoice,
 	forcedToolChoice?: ToolChoice,
 	prepared?: PreparedProviderCall,
+	parentRuntimeRequestId?: string,
 ): Promise<AssistantMessage> {
+	const admittedAtMs = Date.now();
 	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
-	const { model, context: llmContext, promptToolWireTools, ownedDialect } = providerCall;
+	const { model, context: llmContext, promptToolWireTools, ownedDialect, runtimeRequestId } = providerCall;
+	const requestEstimate = estimateRequestContextTokens(llmContext, model);
+	const requestIdentity: RuntimeRequestIdentity = {
+		logicalTurnId,
+		runtimeRequestId,
+		attemptId: randomUUID(),
+		...(parentRuntimeRequestId ? { parentRuntimeRequestId } : {}),
+		estimatedContextTokens: requestEstimate.estimatedContextTokens,
+		inputTokenEstimator: requestEstimate.inputTokenEstimator,
+		providerRequestClass: requestEstimate.providerRequestClass,
+	};
 
 	const streamFunction = streamFn || streamSimple;
 
@@ -1754,6 +1843,7 @@ async function streamAssistantResponse(
 
 	try {
 		const message = await runInActiveSpan(chatSpan, async () => {
+			requestIdentity.queueMs = Date.now() - admittedAtMs;
 			let response = await streamFunction(model, llmContext, {
 				...config,
 				promptCacheKey:
@@ -1808,6 +1898,7 @@ async function streamAssistantResponse(
 					config,
 					stream,
 					requestSignal,
+					requestIdentity,
 				);
 				await finishChat(aborted);
 				return aborted;
@@ -1845,9 +1936,12 @@ async function streamAssistantResponse(
 
 					const event = next.value;
 					if (event.type === "done" || event.type === "error") {
-						let finalMessage = recoverTransientErrorToolTurn(
-							retainCompletedToolCalls(await response.result(), completedToolCallIds),
-							context.tools ?? [],
+						let finalMessage = stampRuntimeRequestIdentity(
+							recoverTransientErrorToolTurn(
+								retainCompletedToolCalls(await response.result(), completedToolCallIds),
+								context.tools ?? [],
+							),
+							requestIdentity,
 						);
 						if (harmonyMitigationEnabled) {
 							const detection = detectHarmonyLeakInAssistantMessage(finalMessage);
@@ -1980,7 +2074,7 @@ async function streamAssistantResponse(
 					throw new HarmonyLeakInterruption(detection, removed, recovered);
 				}
 			}
-			trailing = snapshotAssistantMessage(trailing);
+			trailing = stampRuntimeRequestIdentity(snapshotAssistantMessage(trailing), requestIdentity);
 			if (addedPartial) {
 				context.messages[context.messages.length - 1] = trailing;
 				stream.push({ type: "message_end", message: snapshotAssistantMessage(trailing) });
@@ -2144,6 +2238,7 @@ function emitAbortedAssistantMessage(
 	config: AgentLoopConfig,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	requestSignal: AbortSignal | undefined,
+	requestIdentity: RuntimeRequestIdentity,
 ): AssistantMessage {
 	const model = config.getModel?.() ?? config.model;
 	const errorMessage = abortReasonText(requestSignal);
@@ -2181,7 +2276,7 @@ function emitAbortedAssistantMessage(
 	if (toolCallAbortMessages) {
 		retained.toolCallAbortMessages = toolCallAbortMessages;
 	}
-	const abortedMessage = snapshotAssistantMessage(retained);
+	const abortedMessage = stampRuntimeRequestIdentity(snapshotAssistantMessage(retained), requestIdentity);
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = abortedMessage;
 	} else {

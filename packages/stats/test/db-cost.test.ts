@@ -1,8 +1,10 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import {
 	closeDb,
 	getCostTimeSeries,
+	getFileOffset,
 	getOverallStats,
 	getRecentRequests,
 	getStatsByModel,
@@ -12,7 +14,7 @@ import {
 } from "@oh-my-pi/omp-stats/db";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { getStatsDbPath } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-db-");
@@ -157,7 +159,7 @@ describe("stats subscription cost correction", () => {
 	it("marks subscription-only SuperGrok usage as unpriced", async () => {
 		await initDb();
 		const stats = createXaiOAuthStats("xai-unpriced");
-		stats.model = "grok-composer-2.5-fast";
+		stats.model = "unpriced-supergrok-fixture";
 
 		insertMessageStats([stats]);
 
@@ -165,6 +167,137 @@ describe("stats subscription cost correction", () => {
 		expect(getStatsByModel()[0]).toMatchObject({ totalCost: 0, unpricedRequests: 1 });
 		expect(getStatsByProvider()[0]).toMatchObject({ totalCost: 0, unpricedRequests: 1 });
 		expect(getCostTimeSeries()[0]).toMatchObject({ cost: 0, unpricedRequests: 1 });
+	});
+
+	it("round-trips exact request telemetry without allowing later nulls to erase it", async () => {
+		await initDb();
+		insertMessageStats([createCodexGptStats("telemetry")]);
+		insertMessageStats([
+			{
+				...createCodexGptStats("telemetry"),
+				sessionId: "session-1",
+				runtimeVariant: "code-mode",
+				logicalTurnId: "turn-1",
+				runtimeRequestId: "request-1",
+				parentRuntimeRequestId: "parent-request-1",
+				attemptId: "attempt-1",
+				queueMs: 7,
+				estimatedContextTokens: 123,
+				inputTokenEstimator: "serialized-v1",
+				providerRequestClass: "small",
+			},
+		]);
+		insertMessageStats([
+			{
+				...createCodexGptStats("telemetry"),
+				sessionId: null,
+				runtimeVariant: null,
+				logicalTurnId: null,
+				runtimeRequestId: null,
+				parentRuntimeRequestId: null,
+				attemptId: null,
+				queueMs: null,
+				estimatedContextTokens: null,
+				inputTokenEstimator: null,
+				providerRequestClass: null,
+			},
+		]);
+
+		expect(getRecentRequests(1)[0]).toMatchObject({
+			sessionId: "session-1",
+			runtimeVariant: "code-mode",
+			logicalTurnId: "turn-1",
+			runtimeRequestId: "request-1",
+			parentRuntimeRequestId: "parent-request-1",
+			attemptId: "attempt-1",
+			queueMs: 7,
+			estimatedContextTokens: 123,
+			inputTokenEstimator: "serialized-v1",
+			providerRequestClass: "small",
+		});
+	});
+
+	it("re-enrolls a request_telemetry_v1 database for lineage backfill", async () => {
+		await fs.mkdir(getConfigRootDir(), { recursive: true });
+		const legacy = new Database(getStatsDbPath());
+		legacy.run(`
+			CREATE TABLE messages (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				session_file TEXT NOT NULL,
+				session_id TEXT,
+				entry_id TEXT NOT NULL,
+				folder TEXT NOT NULL,
+				model TEXT NOT NULL,
+				provider TEXT NOT NULL,
+				api TEXT NOT NULL,
+				timestamp INTEGER NOT NULL,
+				duration INTEGER,
+				ttft INTEGER,
+				queue_ms INTEGER,
+				estimated_context_tokens INTEGER,
+				runtime_variant TEXT,
+				logical_turn_id TEXT,
+				runtime_request_id TEXT,
+				input_token_estimator TEXT,
+				provider_request_class TEXT,
+				stop_reason TEXT NOT NULL,
+				error_message TEXT,
+				input_tokens INTEGER NOT NULL,
+				output_tokens INTEGER NOT NULL,
+				cache_read_tokens INTEGER NOT NULL,
+				cache_write_tokens INTEGER NOT NULL,
+				total_tokens INTEGER NOT NULL,
+				premium_requests REAL NOT NULL,
+				cost_input REAL NOT NULL,
+				cost_output REAL NOT NULL,
+				cost_cache_read REAL NOT NULL,
+				cost_cache_write REAL NOT NULL,
+				cost_total REAL NOT NULL,
+				agent_type TEXT NOT NULL DEFAULT 'main',
+				UNIQUE(session_file, entry_id)
+			);
+			CREATE TABLE file_offsets (
+				session_file TEXT PRIMARY KEY,
+				offset INTEGER NOT NULL,
+				last_modified INTEGER NOT NULL
+			);
+			CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+			INSERT INTO file_offsets VALUES ('legacy.jsonl', 100, 200);
+			INSERT INTO meta VALUES ('request_telemetry_v1', 'complete');
+		`);
+		legacy.close();
+
+		await initDb();
+		expect(getFileOffset("legacy.jsonl")).toBeNull();
+		closeDb();
+
+		const migrated = new Database(getStatsDbPath(), { readonly: true });
+		const columns = new Set(
+			(migrated.query("PRAGMA table_info(messages)").all() as Array<{ name: string }>).map(column => column.name),
+		);
+		expect([...columns]).toEqual(
+			expect.arrayContaining([
+				"session_id",
+				"queue_ms",
+				"estimated_context_tokens",
+				"runtime_variant",
+				"logical_turn_id",
+				"runtime_request_id",
+				"parent_runtime_request_id",
+				"attempt_id",
+				"input_token_estimator",
+				"provider_request_class",
+			]),
+		);
+		const v1Sentinel = migrated.query("SELECT value FROM meta WHERE key = 'request_telemetry_v1'").get() as {
+			value: string;
+		} | null;
+		const v2Sentinel = migrated.query("SELECT value FROM meta WHERE key = 'request_telemetry_v2'").get() as {
+			value: string;
+		} | null;
+		expect(v1Sentinel?.value).toBe("complete");
+		expect(v2Sentinel?.value).toBe("pending");
+		migrated.close();
 	});
 
 	it("backfills existing zero-cost subscription rows on database init", async () => {

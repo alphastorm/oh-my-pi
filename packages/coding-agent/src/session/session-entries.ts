@@ -79,9 +79,13 @@ export interface SessionEntryBase {
 	timestamp: string;
 }
 
+export type RuntimeVariant = "main" | "code-mode";
+
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Runtime that originally wrote this assistant entry; absent is historical/unknown. */
+	runtimeVariant?: RuntimeVariant;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {

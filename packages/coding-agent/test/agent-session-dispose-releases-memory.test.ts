@@ -29,6 +29,8 @@ describe("AgentSession dispose releases retained memory", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession | undefined;
+	const originalStreamFns = new WeakMap<AgentSession, Agent["streamFn"]>();
+	const activeReceiptObserverCounts = new WeakMap<AgentSession, () => number>();
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@omp-dispose-release-");
@@ -50,11 +52,25 @@ describe("AgentSession dispose releases retained memory", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("expected bundled model");
 		const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+		const originalStreamFn = mock.stream;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["test"], tools: [] },
-			streamFn: mock.stream,
+			streamFn: originalStreamFn,
 		});
+		let activeReceiptObservers = 0;
+		const addTransportAttemptObserver = agent.addTransportAttemptObserver.bind(agent);
+		agent.addTransportAttemptObserver = observer => {
+			activeReceiptObservers++;
+			const remove = addTransportAttemptObserver(observer);
+			let attached = true;
+			return () => {
+				if (!attached) return;
+				attached = false;
+				activeReceiptObservers--;
+				remove();
+			};
+		};
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(tempDir.path()),
@@ -62,6 +78,8 @@ describe("AgentSession dispose releases retained memory", () => {
 			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
 			agentId: "Main",
 		});
+		originalStreamFns.set(session, originalStreamFn);
+		activeReceiptObserverCounts.set(session, () => activeReceiptObservers);
 		return session;
 	}
 

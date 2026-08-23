@@ -389,6 +389,38 @@ export type OpenAIResponseInclude =
 	| "reasoning.encrypted_content"
 	| "message.output_text.logprobs";
 
+export type TransportAttemptStatus = "success" | "error" | "cancelled";
+export type TransportAttemptCause =
+	| "completed"
+	| "credential-retry"
+	| "provider-error"
+	| "transport-error"
+	| "caller-aborted";
+
+/**
+ * Accounting-only lifecycle for one `streamSimple` provider dispatch. The
+ * event deliberately excludes credentials, request/response payloads, and raw
+ * provider errors.
+ */
+export type TransportAttemptEvent =
+	| {
+			readonly type: "start";
+			readonly attemptId: string;
+			readonly provider: string;
+			readonly model: string;
+			readonly startedAtMs: number;
+	  }
+	| {
+			readonly type: "settle";
+			readonly attemptId: string;
+			readonly provider: string;
+			readonly model: string;
+			readonly endedAtMs: number;
+			readonly status: TransportAttemptStatus;
+			readonly cause: TransportAttemptCause;
+			readonly usage?: Readonly<Usage>;
+	  };
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -520,6 +552,15 @@ export interface StreamOptions {
 	 * Optional callback for provider response metadata after headers are received.
 	 */
 	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>) => void | Promise<void>;
+	/**
+	 * Observe start/settle accounting for each `streamSimple` dispatch,
+	 * including replay-safe credential rotations. This hook is diagnostic:
+	 * callback failures are ignored and cannot alter the provider stream.
+	 *
+	 * Provider-internal HTTP/WebSocket retries are outside this boundary unless
+	 * their transport explicitly emits its own events.
+	 */
+	onTransportAttempt?: (event: TransportAttemptEvent) => void;
 	/**
 	 * Optional callback for raw Server-Sent Events as they arrive from HTTP streaming providers,
 	 * plus synthesized SSE-shaped frames for the Codex WebSocket transport (one synthetic frame

@@ -20,6 +20,7 @@ import {
 	type TextContent,
 	type ThinkingBudgets,
 	type ToolChoice,
+	type TransportAttemptEvent,
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
@@ -373,6 +374,23 @@ export class Agent {
 	};
 	#tokenizer = new Tokenizer(this.#state.model);
 	#listeners = new Set<(e: AgentEvent) => void>();
+	#transportAttemptObservers = new Set<(event: TransportAttemptEvent) => void>();
+	#streamWithTransportAttemptObservers: StreamFn = (model, context, options) => {
+		const observers = Array.from(this.#transportAttemptObservers);
+		if (options?.onTransportAttempt) observers.unshift(options.onTransportAttempt);
+		return this.streamFn(model, context, {
+			...options,
+			onTransportAttempt: event => {
+				for (const observer of observers) {
+					try {
+						observer(event);
+					} catch {
+						// Transport observers are diagnostic and cannot alter the stream.
+					}
+				}
+			},
+		});
+	};
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -815,6 +833,12 @@ export class Agent {
 	subscribe(fn: (e: AgentEvent) => void): () => void {
 		this.#listeners.add(fn);
 		return () => this.#listeners.delete(fn);
+	}
+
+	/** Observe provider-dispatch accounting without taking ownership of `streamFn`. */
+	addTransportAttemptObserver(observer: (event: TransportAttemptEvent) => void): () => void {
+		this.#transportAttemptObservers.add(observer);
+		return () => this.#transportAttemptObservers.delete(observer);
 	}
 
 	/** Register an independently removable hook that runs before queued messages are consumed. */
@@ -1527,9 +1551,11 @@ export class Agent {
 		let turnOpen = false;
 
 		try {
+			const streamFn =
+				this.#transportAttemptObservers.size > 0 ? this.#streamWithTransportAttemptObservers : this.streamFn;
 			const stream = messages
-				? agentLoop(messages, context, config, loopSignal, this.streamFn)
-				: agentLoopContinue(context, config, loopSignal, this.streamFn);
+				? agentLoop(messages, context, config, loopSignal, streamFn)
+				: agentLoopContinue(context, config, loopSignal, streamFn);
 
 			for await (const event of stream) {
 				if (event.type === "turn_start") turnOpen = true;

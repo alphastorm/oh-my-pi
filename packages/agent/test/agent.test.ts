@@ -15,6 +15,46 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { createAssistantMessage } from "./helpers";
 
 describe("Agent", () => {
+	it("composes and removes transport-attempt observers without replacing streamFn", async () => {
+		const mock = createMockModel({ responses: [{ content: ["first"] }, { content: ["second"] }] });
+		let dispatch = 0;
+		const streamFn: Agent["streamFn"] = (model, context, options) => {
+			const attemptId = `attempt-${++dispatch}`;
+			options?.onTransportAttempt?.({
+				type: "start",
+				attemptId,
+				provider: model.provider,
+				model: model.id,
+				startedAtMs: dispatch * 10,
+			});
+			options?.onTransportAttempt?.({
+				type: "settle",
+				attemptId,
+				provider: model.provider,
+				model: model.id,
+				endedAtMs: dispatch * 10 + 1,
+				status: "success",
+				cause: "completed",
+			});
+			return mock.stream(model, context, options);
+		};
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn,
+		});
+		const observed: string[] = [];
+		const removeObserver = agent.addTransportAttemptObserver(event => observed.push(event.type));
+
+		await agent.prompt("first");
+		expect(observed).toEqual(["start", "settle"]);
+		expect(agent.streamFn).toBe(streamFn);
+
+		removeObserver();
+		await agent.prompt("second");
+		expect(observed).toEqual(["start", "settle"]);
+		expect(agent.streamFn).toBe(streamFn);
+	});
+
 	it("should support steering message queueing", async () => {
 		const agent = new Agent();
 

@@ -2,13 +2,23 @@ import { afterEach, describe, expect, it } from "bun:test";
 import type { ApiKeyResolveContext } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai";
 import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { classify } from "@oh-my-pi/pi-ai/error/flags";
+import { classify, isCodexChatGPTAccountPolicyError } from "@oh-my-pi/pi-ai/error/flags";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
+import type {
+	Api,
+	AssistantMessage,
+	Context,
+	Model,
+	SimpleStreamOptions,
+	TransportAttemptEvent,
+	Usage,
+} from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 
 const SOURCE_ID = "stream-auth-retry-test";
 const API = "stream-auth-retry-test" as Api;
+const CODEX_CHATGPT_MODEL_DENIAL =
+	"The 'gpt-daybreak-blue-latest' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)";
 
 function usage(): Usage {
 	return {
@@ -52,7 +62,7 @@ function googleResourceExhaustedMessage(): string {
 	return "Google API error (429): Resource exhausted. Please try again later.";
 }
 
-function model(): Model<Api> {
+function model(overrides: Partial<Model<Api>> = {}): Model<Api> {
 	return {
 		id: "test-model",
 		name: "Test Model",
@@ -60,6 +70,7 @@ function model(): Model<Api> {
 		provider: "test-provider",
 		contextWindow: 1000,
 		maxTokens: 100,
+		...overrides,
 	} as Model<Api>;
 }
 
@@ -87,6 +98,7 @@ describe("streamSimple resolver auth retry", () => {
 	it("retries with a refreshed key when a 401 is thrown before the first event", async () => {
 		const keys: unknown[] = [];
 		const contexts: ApiKeyResolveContext[] = [];
+		const attemptEvents: TransportAttemptEvent[] = [];
 		registerCustomApi(
 			API,
 			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
@@ -103,6 +115,7 @@ describe("streamSimple resolver auth retry", () => {
 				contexts.push(ctx);
 				return ctx.error === undefined ? "old-key" : ctx.lastChance ? "switch-key" : "refresh-key";
 			},
+			onTransportAttempt: event => attemptEvents.push(event),
 		});
 		for await (const _event of stream) {
 			// drain
@@ -118,6 +131,24 @@ describe("streamSimple resolver auth retry", () => {
 		]);
 		expect(contexts[1]).toBeDefined();
 		expect((contexts[1]!.error as { status?: number }).status).toBe(401);
+		expect(
+			attemptEvents.map(event =>
+				event.type === "start"
+					? [event.type, event.provider, event.model]
+					: [event.type, event.status, event.cause],
+			),
+		).toEqual([
+			["start", "test-provider", "test-model"],
+			["settle", "error", "credential-retry"],
+			["start", "test-provider", "test-model"],
+			["settle", "success", "completed"],
+		]);
+		expect(attemptEvents[0]?.type === "start" ? attemptEvents[0].attemptId : undefined).toBe(
+			attemptEvents[1]?.type === "settle" ? attemptEvents[1].attemptId : undefined,
+		);
+		expect(attemptEvents[2]?.type === "start" ? attemptEvents[2].attemptId : undefined).toBe(
+			attemptEvents[3]?.type === "settle" ? attemptEvents[3].attemptId : undefined,
+		);
 	});
 
 	it("replays exactly once after a provider requests token refresh, then succeeds", async () => {
@@ -244,6 +275,66 @@ describe("streamSimple resolver auth retry", () => {
 		expect(providerCalls).toBe(1);
 		expect(keys).toEqual(["initial-key"]);
 		expect(contexts).toHaveLength(1);
+	});
+
+	it("rotates directly to a sibling for the exact Codex ChatGPT-account model denial", async () => {
+		const keys: unknown[] = [];
+		const contexts: ApiKeyResolveContext[] = [];
+		const attemptEvents: TransportAttemptEvent[] = [];
+		const codexModel = model({
+			id: "gpt-daybreak-blue-latest",
+			name: "Daybreak Blue",
+			provider: "openai-codex",
+		});
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (keys.length === 1) {
+						stream.fail(
+							new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400, { code: "invalid_request_error" }),
+						);
+						return;
+					}
+					ok(stream);
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(codexModel, context, {
+			apiKey: async ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? "denied-key" : ctx.lastChance ? "sibling-key" : "refresh-key";
+			},
+			onTransportAttempt: event => attemptEvents.push(event),
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+		expect(keys).toEqual(["denied-key", "sibling-key"]);
+		expect(contexts.map(ctx => ({ lastChance: ctx.lastChance, hasError: ctx.error !== undefined }))).toEqual([
+			{ lastChance: false, hasError: false },
+			{ lastChance: true, hasError: true },
+		]);
+		expect(isCodexChatGPTAccountPolicyError(contexts[1]?.error, codexModel.provider, codexModel.id)).toBe(true);
+		expect(
+			attemptEvents.map(event =>
+				event.type === "start"
+					? [event.type, event.provider, event.model]
+					: [event.type, event.status, event.cause],
+			),
+		).toEqual([
+			["start", "openai-codex", "gpt-daybreak-blue-latest"],
+			["settle", "error", "credential-retry"],
+			["start", "openai-codex", "gpt-daybreak-blue-latest"],
+			["settle", "success", "completed"],
+		]);
 	});
 
 	it("surfaces a 403 concurrency cap for transient backoff without rotating credentials", async () => {

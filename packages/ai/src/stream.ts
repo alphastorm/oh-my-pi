@@ -74,6 +74,8 @@ import type {
 	StreamOptions,
 	ThinkingBudgets,
 	ToolChoice,
+	TransportAttemptCause,
+	TransportAttemptStatus,
 } from "./types";
 import { resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
@@ -1429,7 +1431,114 @@ function streamSimpleWithAnthropicCacheRefresh<TApi extends Api>(
 	return outer;
 }
 
-export function streamSimple<TApi extends Api>(
+function transportAttemptStatus(message: AssistantMessage): TransportAttemptStatus {
+	if (message.stopReason === "aborted") return "cancelled";
+	if (message.stopReason === "error") return "error";
+	return "success";
+}
+
+function transportAttemptCause(model: Model<Api>, message: AssistantMessage): TransportAttemptCause {
+	if (message.stopReason === "aborted") return "caller-aborted";
+	if (message.stopReason !== "error") return "completed";
+	const error = createAssistantAuthError(message);
+	return isRetryableUpstreamError(model, error, extractStatusFromAssistantError(message), message.errorMessage)
+		? "credential-retry"
+		: "provider-error";
+}
+
+function thrownTransportAttemptCause(
+	model: Model<Api>,
+	error: unknown,
+	signal: AbortSignal | undefined,
+): TransportAttemptCause {
+	if (signal?.aborted || AIError.is(AIError.classify(error), AIError.Flag.Abort)) return "caller-aborted";
+	return isRetryableUpstreamError(
+		model,
+		error,
+		AIError.status(error),
+		error instanceof Error ? error.message : undefined,
+	)
+		? "credential-retry"
+		: "transport-error";
+}
+
+function notifyTransportAttempt(
+	observer: NonNullable<SimpleStreamOptions["onTransportAttempt"]>,
+	event: Parameters<NonNullable<SimpleStreamOptions["onTransportAttempt"]>>[0],
+): void {
+	try {
+		observer(event);
+	} catch {
+		// Accounting observers are diagnostic and cannot alter the stream.
+	}
+}
+
+function observeTransportAttempt<TApi extends Api>(
+	inner: AssistantMessageEventStream,
+	model: Model<TApi>,
+	options: SimpleStreamOptions,
+	attemptId: string,
+	startedAtMs: number,
+): AssistantMessageEventStream {
+	const observer = options.onTransportAttempt;
+	if (!observer) return inner;
+	const outer = new AssistantMessageEventStream();
+	notifyTransportAttempt(observer, {
+		type: "start",
+		attemptId,
+		provider: model.provider,
+		model: model.id,
+		startedAtMs,
+	});
+
+	void (async () => {
+		let settled = false;
+		const settle = (message: AssistantMessage): void => {
+			if (settled) return;
+			settled = true;
+			notifyTransportAttempt(observer, {
+				type: "settle",
+				attemptId,
+				provider: model.provider,
+				model: model.id,
+				endedAtMs: Date.now(),
+				status: transportAttemptStatus(message),
+				cause: transportAttemptCause(model, message),
+				usage: message.usage,
+			});
+		};
+		try {
+			for await (const event of inner) {
+				if (event.type === "done") settle(event.message);
+				else if (event.type === "error") settle(event.error);
+				outer.push(event);
+			}
+			const message = await inner.result();
+			settle(message);
+			if (!outer.done) outer.end(message);
+		} catch (error) {
+			if (!settled) {
+				settled = true;
+				notifyTransportAttempt(observer, {
+					type: "settle",
+					attemptId,
+					provider: model.provider,
+					model: model.id,
+					endedAtMs: Date.now(),
+					status:
+						options.signal?.aborted || AIError.is(AIError.classify(error), AIError.Flag.Abort)
+							? "cancelled"
+							: "error",
+					cause: thrownTransportAttemptCause(model, error, options.signal),
+				});
+			}
+			outer.fail(error);
+		}
+	})();
+	return outer;
+}
+
+function streamSimpleInternal<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: SimpleStreamOptions,
@@ -1481,7 +1590,11 @@ function streamSimpleRequest<TApi extends Api>(
 
 			try {
 				const attemptOptions = { ...requestOptions, apiKey };
-				const inner = streamSimpleRequest(model, context, attemptOptions);
+				const startedAtMs = Date.now();
+				const request = streamSimpleRequest(model, context, attemptOptions);
+				const inner = attemptOptions.onTransportAttempt
+					? observeTransportAttempt(request, model, attemptOptions, crypto.randomUUID(), startedAtMs)
+					: request;
 				for await (const event of inner) {
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
@@ -1695,6 +1808,18 @@ function streamSimpleRequest<TApi extends Api>(
 	const providerModel = getProviderDefinition(model.provider)?.prepareModel?.(model) ?? model;
 	const providerOptions = mapOptionsForApi(providerModel, requestOptions, apiKey);
 	return stream(providerModel, context, providerOptions);
+}
+
+export function streamSimple<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	const startedAtMs = Date.now();
+	const inner = streamSimpleInternal(model, context, options);
+	const observer = options?.onTransportAttempt;
+	if (!observer || isApiKeyResolver(options?.apiKey)) return inner;
+	return observeTransportAttempt(inner, model, options, crypto.randomUUID(), startedAtMs);
 }
 
 export async function completeSimple<TApi extends Api>(

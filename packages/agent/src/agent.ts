@@ -162,6 +162,13 @@ export interface AgentOptions {
 	 */
 	promptCacheKey?: string;
 	/**
+	 * Account-scoped single-flight gate evaluated at the provider boundary.
+	 * Callers must return an explicit unsupported/ineligible disposition rather
+	 * than manufacturing cache reuse for a transport without shared caching.
+	 */
+	providerPromptCacheGate?: AgentLoopConfig["providerPromptCacheGate"];
+
+	/**
 	 * Shared provider state map for session-scoped transport/session caches.
 	 */
 	providerSessionState?: Map<string, ProviderSessionState>;
@@ -407,6 +414,8 @@ export class Agent {
 	#sessionId?: string;
 	#deadline?: number;
 	#promptCacheKey?: string;
+	#providerPromptCacheGate?: AgentLoopConfig["providerPromptCacheGate"];
+
 	#metadata?: Record<string, unknown>;
 	#metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	#providerSessionState?: Map<string, ProviderSessionState>;
@@ -502,6 +511,8 @@ export class Agent {
 		this.#sessionId = opts.sessionId;
 		this.#deadline = opts.deadline;
 		this.#promptCacheKey = opts.promptCacheKey;
+		this.#providerPromptCacheGate = opts.providerPromptCacheGate;
+
 		this.#providerSessionState = opts.providerSessionState;
 		this.#thinkingBudgets = opts.thinkingBudgets;
 		this.#temperature = opts.temperature;
@@ -1565,6 +1576,7 @@ export class Agent {
 			sessionId: this.#sessionId,
 			deadline: this.#deadline,
 			promptCacheKey: this.#promptCacheKey,
+			providerPromptCacheGate: this.#providerPromptCacheGate,
 			metadata: this.#metadataResolver ? undefined : this.#metadata,
 			metadataResolver: this.#metadataResolver,
 			providerSessionState: this.#providerSessionState,

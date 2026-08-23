@@ -2,6 +2,8 @@
  * Agent loop that works with AgentMessage throughout.
  * Transforms to Message[] only at the LLM call boundary.
  */
+import { createHash, createHmac, randomBytes } from "node:crypto";
+
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
@@ -23,6 +25,7 @@ import {
 	toolWireSchema,
 	validateToolArguments,
 } from "@oh-my-pi/pi-ai";
+import { resolveCacheRetention } from "@oh-my-pi/pi-ai/utils";
 import {
 	type Dialect,
 	encodeInbandToolHistory,
@@ -94,6 +97,8 @@ import {
 	SPECULATIVE_STREAM_SESSION,
 } from "./types";
 import { yieldIfDue } from "./utils/yield";
+
+const PROMPT_CACHE_ACCOUNT_WITNESS_KEY = randomBytes(32);
 /** Stop-details marker for a provider error after assistant content/tool args already streamed. */
 export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_after_content";
 
@@ -1799,6 +1804,71 @@ async function streamAssistantResponse(
 	// `getCwd` is read once per LLM call so a mid-run session move (`/move`) reaches
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
 	const effectiveCwd = config.getCwd?.() ?? config.cwd;
+	const promptCacheLease =
+		!isApiKeyResolver(requestApiKey) &&
+		resolvedApiKey !== undefined &&
+		resolvedApiKey.trim().length > 0 &&
+		config.providerPromptCacheGate
+			? await config.providerPromptCacheGate(
+					{
+						provider: model.provider,
+						model: model.id,
+						api: model.api,
+						accountWitness: createHmac("sha256", PROMPT_CACHE_ACCOUNT_WITNESS_KEY)
+							.update("omp-prompt-cache-account:key\0")
+							.update(resolvedApiKey)
+							.digest("hex"),
+						requestProfile: {
+							api: model.api,
+							baseUrl: model.baseUrl,
+							requestModelId: model.requestModelId,
+							headersDigest: model.headers
+								? createHash("sha256")
+										.update(
+											JSON.stringify(
+												Object.entries(model.headers).sort(([left], [right]) =>
+													left < right ? -1 : left > right ? 1 : 0,
+												),
+											),
+										)
+										.digest("hex")
+								: undefined,
+							compat: model.compat,
+							modelReasoningMode: model.reasoningMode,
+							maxTokens: config.maxTokens,
+							temperature: effectiveTemperature,
+							topP: config.topP,
+							topK: config.topK,
+							minP: config.minP,
+							presencePenalty: config.presencePenalty,
+							repetitionPenalty: config.repetitionPenalty,
+							toolChoice: effectiveToolChoice,
+							disableReasoning: effectiveDisableReasoning,
+							kimiApiFormat: config.kimiApiFormat,
+							preferWebsockets: config.preferWebsockets,
+							openrouterVariant: config.openrouterVariant,
+							antigravityEndpointMode: config.antigravityEndpointMode,
+							textVerbosity: config.textVerbosity,
+							fallbacks: config.fallbacks,
+						},
+						promptCacheKey: config.promptCacheKey,
+						systemPrompt: llmContext.systemPrompt ?? [],
+						tools: (llmContext.tools ?? []).map(tool => ({
+							name: tool.name,
+							description: tool.description,
+							parameters: tool.parameters,
+							...(tool.strict !== undefined ? { strict: tool.strict } : {}),
+							...(tool.customFormat !== undefined ? { customFormat: tool.customFormat } : {}),
+							...(tool.customWireName !== undefined ? { customWireName: tool.customWireName } : {}),
+							...(tool.native !== undefined ? { native: tool.native } : {}),
+						})),
+						reasoningMode: { reasoning: effectiveReasoning, disabled: effectiveDisableReasoning },
+						serviceTier: effectiveServiceTier,
+						cacheRetention: resolveCacheRetention(config.cacheRetention),
+					},
+					finalRequestSignal,
+				)
+			: undefined;
 
 	const chatStepNumber = stepCounter.count;
 	stepCounter.count += 1;
@@ -1840,9 +1910,15 @@ async function streamAssistantResponse(
 	};
 
 	try {
-		return await runInActiveSpan(chatSpan, async () => {
+		const message = await runInActiveSpan(chatSpan, async () => {
 			let response = await streamFunction(model, llmContext, {
 				...config,
+				promptCacheKey:
+					promptCacheLease?.decision === "warmup-owner" || promptCacheLease?.decision === "ready"
+						? promptCacheLease.promptCacheKey
+						: config.providerPromptCacheGate
+							? undefined
+							: config.promptCacheKey,
 				apiKey,
 				metadata: resolvedMetadata,
 				toolChoice: effectiveToolChoice,
@@ -2318,7 +2394,14 @@ async function streamAssistantResponse(
 				throw error;
 			}
 		});
+		if (promptCacheLease?.decision === "warmup-owner") {
+			promptCacheLease.settle(
+				message.stopReason === "error" || message.stopReason === "aborted" ? "failed" : "ready",
+			);
+		}
+		return message;
 	} catch (err) {
+		if (promptCacheLease?.decision === "warmup-owner") promptCacheLease.settle("failed");
 		failChatSpan(telemetry, chatSpan, {
 			errorObject: err,
 			responseHeaders: capturedHeaders,

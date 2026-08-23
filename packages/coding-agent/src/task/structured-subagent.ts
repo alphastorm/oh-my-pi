@@ -38,6 +38,8 @@ import {
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
+import type { PromptCacheCohortParticipant } from "./prompt-cache-cohort";
+
 import { resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
@@ -103,6 +105,9 @@ export interface StructuredSubagentRequest {
 	detached?: boolean;
 	invokedAt?: number;
 	acquiredAt?: number;
+	/** Internal task-batch cohort lease; never accepted from the task wire shape. */
+	promptCacheCohort?: PromptCacheCohortParticipant;
+
 	isolation?: StructuredSubagentIsolationControls;
 	/** The parent agent name forbidden from recursively spawning itself. */
 	blockedAgent?: string;
@@ -442,6 +447,7 @@ function buildExecutorOptions(
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
+		promptCacheCohort: request.promptCacheCohort,
 		...(policy.schema.source === "none"
 			? {}
 			: {

@@ -9,6 +9,7 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import { resolveCacheRetention } from "@oh-my-pi/pi-ai/utils";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
@@ -76,6 +77,7 @@ import type { WorkspaceTree } from "../workspace-tree";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
+import { type PromptCacheCohortParticipant, resolvePromptCacheProviderSupport } from "./prompt-cache-cohort";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
@@ -347,6 +349,28 @@ export function collectIrcPeerRoster(
 	return { peers, parkedCount, omittedCount };
 }
 
+function formatCohortIrcPeerRoster(roster: IrcPeerRosterData): string {
+	const lines = roster.peers.map(
+		peer =>
+			`- \`${peer.id}\` — ${peer.displayName} (${peer.kind}, ${peer.status})${peer.activity ? `: ${peer.activity}` : ""}`,
+	);
+	if (lines.length === 0) {
+		lines.push(roster.parkedCount > 0 ? "- (no live agents)" : "- (no other agents)");
+	}
+	if (roster.omittedCount > 0) {
+		lines.push(`${roster.omittedCount} more live peer(s) omitted.`);
+	}
+	if (roster.peers.some(peer => peer.status === "idle")) {
+		lines.push("Idle peers are not gone: messaging them wakes them.");
+	}
+	if (roster.parkedCount > 0) {
+		lines.push(
+			`${roster.parkedCount} parked peer(s) omitted. Query with \`hub\` op:"list" status:"parked".`,
+		);
+	}
+	return lines.join("\n");
+}
+
 function withAbortTimeout<T>(
 	promise: Promise<T>,
 	timeoutMs: number,
@@ -400,6 +424,8 @@ export interface ExecutorOptions {
 	getApiKey?: CreateAgentSessionOptions["getApiKey"];
 	/** Parent session whose stored credential affinities seed the child session. */
 	credentialSourceSessionId?: string;
+	/** Exact-prefix cohort lease supplied only by an eligible task batch. */
+	promptCacheCohort?: PromptCacheCohortParticipant;
 	worktree?: string;
 	agent: AgentDefinition;
 	task: string;
@@ -3427,6 +3453,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		let sessionOpenedAt: number | undefined;
 		let sessionCreatedAt: number | undefined;
 		let readyAt: number | undefined;
+		let initialPromptCacheCohort: PromptCacheCohortParticipant | undefined;
 
 		try {
 			checkAbort();
@@ -3639,111 +3666,135 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// the same JSONL file re-invokes createAgentSession with the exact options
 			// of the original run (same agent id, tools, model, system prompt,
 			// artifacts dir) — only the SessionManager differs.
+			let cohortSession: AgentSession | undefined;
+			initialPromptCacheCohort =
+				model &&
+				resolveCacheRetention() !== "none" &&
+				resolvePromptCacheProviderSupport(model.provider, model.api).supported
+					? options.promptCacheCohort
+					: undefined;
+
 			const buildSubagentSessionOptions = (
 				sessionManagerForRun: SessionManager,
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
-				// Parked workers always revive with an empty runtime yield set; a
-				// pooled follow-up reinstalls its items explicitly before turning.
-				// Without this, the registry lookup below misses (session === null
-				// while the replacement builds) and the revived prompt resurrects
-				// the launch-time pooled instructions against an ordinary runtime.
+				usePromptCacheCohort: boolean,
 				forRevive = false,
-			): CreateAgentSessionOptions => ({
-				cwd: worktree ?? cwd,
-				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
-				authStorage,
-				modelRegistry,
-				getApiKey: options.getApiKey,
-				credentialSourceSessionId: options.credentialSourceSessionId,
-				settings: subagentSettings,
-				model,
-				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
-				modelPatternAuthFallback:
-					model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
-				modelPatternFallbackRole:
-					model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
-				modelPatternDefaultFallbackChain:
-					model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
-				thinkingLevel: effectiveThinkingLevel,
-				thinkingLevelCeiling: spawnEffortCeiling,
-				// A revived session restores the tier history it persisted (including
-				// tiers a provider rejected or an extension changed since spawn); only
-				// the fresh spawn resolves the per-agent override.
-				resolveServiceTierByFamily: forRevive ? undefined : resolveServiceTierByFamily,
-				toolNames,
-				outputSchema,
-				outputSchemaMode: options.outputSchemaMode,
-				restrictToolNames: options.restrictToolNames,
-				requireYieldTool: true,
-				contextFiles: options.contextFiles,
-				skills: options.skills,
-				promptTemplates: options.promptTemplates,
-				workspaceTree: options.workspaceTree,
-				rules: options.rules,
-				extensionRoots: options.extensionRoots,
-				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
-				preloadedPreparedExtensions: options.preloadedPreparedExtensions,
-				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
-				systemPrompt: defaultPrompt => {
-					const ircRoster = ircEnabled
-						? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
-						: undefined;
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-						agent: agent.systemPrompt,
-						context: options.context?.trim() ?? "",
-						planReference: options.planReference?.content ?? "",
-						planReferencePath: options.planReference?.path ?? "",
-						worktree: worktree ?? "",
-						outputSchema: normalizedOutputSchema,
-						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						// Read the live item set through the registry instead of capturing
-						// the session: this callback outlives the turn via the lifecycle
-						// reviver, and a captured session would pin its whole graph past
-						// TTL park disposal. Parked revivals build while the registry
-						// session is null, so render the cleared set rather than
-						// resurrecting the launch-time pooled instructions.
-						workPoolYieldItems:
-							AgentRegistry.global().get(id)?.session?.getWorkPoolYieldItems?.() ??
-							(forRevive ? [] : (options.workPoolYieldItems ?? [])),
-						ircPeers: ircRoster?.peers ?? [],
-						ircParkedCount: ircRoster?.parkedCount ?? 0,
-						ircOmittedCount: ircRoster?.omittedCount ?? 0,
-						ircSelfId: ircEnabled ? id : "",
-					});
-					return defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-				},
-				sessionManager: sessionManagerForRun,
-				hasUI: false,
-				prewalk,
-				spawns: spawnsEnv,
-				taskDepth: childDepth,
-				// The whole spawn tree shares the root session's observability bus,
-				// so nested lifecycle/progress/event frames reach its surfaces
-				// without leaking into another root session's traffic.
-				subagentEventBus: options.subagentEventBus,
-				parentHindsightSessionState: options.parentHindsightSessionState,
-				parentMnemopiSessionState: options.parentMnemopiSessionState,
-				parentTaskPrefix: id,
-				parentAgentId: options.parentAgentId,
-				agentId: id,
-				agentDisplayName: agent.name,
-				agentName: agent.name,
-				expectedAgentRef,
-				enableLsp: lspEnabled,
-				enableIrc: options.enableIrc,
-				skipPythonPreflight,
-				enableMCP,
-				mcpManager,
-				customTools: sessionCustomTools.length > 0 ? sessionCustomTools : undefined,
-				localProtocolOptions: options.localProtocolOptions,
-				telemetry: subagentTelemetry,
-				parentEvalSessionId: options.parentEvalSessionId,
-				onFirstChatDispatch: () => {
-					firstChatDispatchAt ??= performance.now();
-				},
-			});
+			): CreateAgentSessionOptions => {
+				const promptCacheCohort = usePromptCacheCohort ? initialPromptCacheCohort : undefined;
+				return {
+					cwd: worktree ?? cwd,
+					additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
+					authStorage,
+					modelRegistry,
+					getApiKey:
+						options.getApiKey ??
+						(promptCacheCohort
+							? requestModel =>
+									modelRegistry.resolver(
+										requestModel,
+										resolvePromptCacheProviderSupport(requestModel.provider, requestModel.api).supported
+											? promptCacheCohort.routingKey
+											: sessionManagerForRun.getSessionId(),
+									)
+							: undefined),
+					credentialSourceSessionId: options.credentialSourceSessionId,
+					...(promptCacheCohort
+						? {
+								providerPromptCacheKey: promptCacheCohort.routingKey,
+								providerPromptCacheKeySource: "explicit" as const,
+								providerPromptCacheGate: (request, requestSignal) =>
+									promptCacheCohort.acquire(
+										request,
+										options.contextFiles ?? [],
+										cohortSession?.getXdevToolEntries() ?? [],
+										requestSignal,
+									),
+							}
+						: {}),
+					settings: subagentSettings,
+					model,
+					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
+					modelPatternAuthFallback:
+						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+					modelPatternFallbackRole:
+						model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
+					modelPatternDefaultFallbackChain:
+						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
+					thinkingLevel: effectiveThinkingLevel,
+					thinkingLevelCeiling: spawnEffortCeiling,
+					// Revivals restore persisted tier history rather than reapplying spawn overrides.
+					resolveServiceTierByFamily: forRevive ? undefined : resolveServiceTierByFamily,
+					toolNames,
+					outputSchema,
+					outputSchemaMode: options.outputSchemaMode,
+					restrictToolNames: options.restrictToolNames,
+					requireYieldTool: true,
+					contextFiles: options.contextFiles,
+					skills: options.skills,
+					promptTemplates: options.promptTemplates,
+					workspaceTree: options.workspaceTree,
+					rules: options.rules,
+					extensionRoots: options.extensionRoots,
+					preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
+					preloadedPreparedExtensions: options.preloadedPreparedExtensions,
+					preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
+					systemPrompt: defaultPrompt => {
+						const ircRoster =
+							ircEnabled && !promptCacheCohort
+								? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
+								: undefined;
+						const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+							agent: agent.systemPrompt,
+							context: options.context?.trim() ?? "",
+							planReference: options.planReference?.content ?? "",
+							planReferencePath: options.planReference?.path ?? "",
+							worktree: worktree ?? "",
+							outputSchema: normalizedOutputSchema,
+							outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+							// Revivals start cleared; pooled follow-ups install their live contract.
+							workPoolYieldItems:
+								AgentRegistry.global().get(id)?.session?.getWorkPoolYieldItems?.() ??
+								(forRevive ? [] : (options.workPoolYieldItems ?? [])),
+							ircPeers: ircRoster?.peers ?? [],
+							ircParkedCount: ircRoster?.parkedCount ?? 0,
+							ircOmittedCount: ircRoster?.omittedCount ?? 0,
+							ircSelfId: ircRoster ? id : "",
+						});
+						return defaultPrompt.length === 0
+							? [subagentPrompt]
+							: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
+					},
+					sessionManager: sessionManagerForRun,
+					hasUI: false,
+					prewalk,
+					spawns: spawnsEnv,
+					taskDepth: childDepth,
+					// The whole spawn tree shares the root session's observability bus,
+					// so nested lifecycle/progress/event frames reach its surfaces
+					// without leaking into another root session's traffic.
+					subagentEventBus: options.subagentEventBus,
+					parentHindsightSessionState: options.parentHindsightSessionState,
+					parentMnemopiSessionState: options.parentMnemopiSessionState,
+					parentTaskPrefix: id,
+					parentAgentId: options.parentAgentId,
+					agentId: id,
+					agentDisplayName: agent.name,
+					agentName: agent.name,
+					expectedAgentRef,
+					enableLsp: lspEnabled,
+					enableIrc: options.enableIrc,
+					skipPythonPreflight,
+					enableMCP,
+					mcpManager,
+					customTools: sessionCustomTools.length > 0 ? sessionCustomTools : undefined,
+					localProtocolOptions: options.localProtocolOptions,
+					telemetry: subagentTelemetry,
+					parentEvalSessionId: options.parentEvalSessionId,
+					onFirstChatDispatch: () => {
+						firstChatDispatchAt ??= performance.now();
+					},
+				};
+			};
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
 			if (options.parentArtifactManager) {
@@ -3760,10 +3811,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				);
 			}
 
-			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
+			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null, true));
 			let session: AgentSession;
 			try {
 				({ session } = await awaitAbortable(sessionPromise));
+				cohortSession = session;
 			} catch (err) {
 				// Abort raced session startup. The session may still resolve later
 				// holding live LSP/MCP child processes — dispose it when it does so
@@ -3823,7 +3875,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						);
 					}
 					const { session: revived } = await createAgentSession(
-						buildSubagentSessionOptions(reopened, expectedAgentRef, true),
+						buildSubagentSessionOptions(reopened, expectedAgentRef, false, true),
 					);
 					// Re-run the executor's extension wiring on the rebuilt session.
 					// Skipping it leaves the runner pre-init, so a `tool_call` handler
@@ -3993,7 +4045,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			readyAt = performance.now();
-			const outcome = await driveSessionToYield(session, monitor, task);
+			const cohortRoster =
+				initialPromptCacheCohort && ircEnabled
+					? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
+					: undefined;
+			const cohortTask =
+				cohortRoster
+					? `# Peers\nYou can reach other live agents via the hub tool. Your id is ${id}.\n${formatCohortIrcPeerRoster(cohortRoster)}\nUse hub messaging only for quick coordination; refresh the roster with hub list before relying on it.\n\n${task}`
+					: task;
+			const outcome = await driveSessionToYield(session, monitor, cohortTask);
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left
 			// `running` before the (possibly slow) cleanup below.
@@ -4081,6 +4141,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			const session = monitor.takeActiveSession();
 			if (session) {
+				if (initialPromptCacheCohort) {
+					session.agent.promptCacheKey = undefined;
+				}
 				monitor.captureSalvage(session);
 				if (options.keepAlive !== false) {
 					installIrcWakeTurnMonitor(session);

@@ -12,6 +12,7 @@ import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { TerminalReceipt } from "../../session/terminal-receipt";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import {
 	RPC_MESSAGES_PAGE_BUSY_ERROR,
@@ -855,6 +856,12 @@ export class RpcClient {
 	async getLastAssistantText(): Promise<string | null> {
 		const response = await this.#send({ type: "get_last_assistant_text" });
 		return this.#getData<{ text: string | null }>(response).text;
+	}
+
+	/** Get the sanitized receipt from the most recently settled terminal turn. */
+	async getLastTerminalReceipt(): Promise<TerminalReceipt | null> {
+		const response = await this.#send({ type: "get_last_terminal_receipt" });
+		return this.#getData<{ receipt: TerminalReceipt | null }>(response).receipt;
 	}
 
 	/**

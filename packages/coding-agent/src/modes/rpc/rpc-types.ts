@@ -11,6 +11,7 @@ import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { FileEntry } from "../../session/session-entries";
+import type { TerminalReceipt } from "../../session/terminal-receipt";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
 import type {
 	AgentProgress,
@@ -81,6 +82,7 @@ export type RpcCommand =
 	| { id?: string; type: "branch"; entryId: string }
 	| { id?: string; type: "get_branch_messages" }
 	| { id?: string; type: "get_last_assistant_text" }
+	| { id?: string; type: "get_last_terminal_receipt" }
 	| { id?: string; type: "set_session_name"; name: string }
 	| { id?: string; type: "handoff"; customInstructions?: string }
 
@@ -320,6 +322,13 @@ export type RpcResponse =
 			command: "get_last_assistant_text";
 			success: true;
 			data: { text: string | null };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_last_terminal_receipt";
+			success: true;
+			data: { receipt: TerminalReceipt | null };
 	  }
 	| { id?: string; type: "response"; command: "set_session_name"; success: true }
 	| { id?: string; type: "response"; command: "handoff"; success: true; data: RpcHandoffResult | null }

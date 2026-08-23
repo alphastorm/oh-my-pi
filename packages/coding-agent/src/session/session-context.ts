@@ -161,6 +161,12 @@ export interface BuildSessionContextOptions {
 	/** In transcript mode, elide entries replaced by the latest compaction. */
 	collapseCompactedHistory?: boolean;
 	/**
+	 * Build provider-independent typed history for a portable checkpoint.
+	 * Remote provider replacement payloads are ignored so their corresponding
+	 * kept typed messages remain present in the result.
+	 */
+	portable?: boolean;
+	/**
 	 * Transcript mode only: keep `toolCall` blocks that have no matching
 	 * `toolResult` on the path instead of stripping them. Pass this when the
 	 * session is mid-turn (a tool is still executing, its result not yet
@@ -531,11 +537,11 @@ export function buildSessionContext(
 			appendMessage(path[i]);
 		}
 	} else if (compaction) {
-		const remotePayload = getOpenAiRemoteCompactionPayload(compaction);
+		const remotePayload = options?.portable ? undefined : getOpenAiRemoteCompactionPayload(compaction);
 		const remoteReplacementHistory = remotePayload?.items;
 		// Anthropic server compaction persists a plain-text summary plus its
 		// native replay; the kept tail still comes from entries below.
-		const anthropicPayload = getAnthropicCompactionPayload(compaction.preserveData);
+		const anthropicPayload = options?.portable ? undefined : getAnthropicCompactionPayload(compaction.preserveData);
 		const providerPayload = remotePayload ?? anthropicPayload;
 
 		// Find compaction index in path

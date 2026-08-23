@@ -1,6 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, AgentBusyError, type AgentEvent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	AgentBusyError,
+	type AgentEvent,
+	type AgentTool,
+	type ProviderPromptCacheRequest,
+	ThinkingLevel,
+} from "@oh-my-pi/pi-agent-core";
 import type { SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -1317,6 +1324,122 @@ describe("Agent", () => {
 
 		expect(mock.calls[0]?.options?.sessionId).toBe("provider-lineage");
 		expect(mock.calls[0]?.options?.promptCacheKey).toBe("parent-cache");
+	});
+
+	it("gates provider dispatch with a credential witness and settles a successful warmup", async () => {
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+		let captured: ProviderPromptCacheRequest | undefined;
+		let settled: string | undefined;
+		const agent = new Agent({
+			initialState: { model: mock.model, messages: [] },
+			streamFn: mock.stream,
+			getApiKey: () => "raw-secret",
+			sessionId: "cohort-routing",
+			promptCacheKey: "cohort-routing",
+			providerPromptCacheGate: async request => {
+				captured = request;
+				return {
+					decision: "warmup-owner",
+					promptCacheKey: "exact-prefix-digest",
+					settle: outcome => {
+						settled = outcome;
+					},
+				};
+			},
+		});
+
+		await agent.prompt("run");
+
+		expect(captured?.accountWitness).toMatch(/^[a-f0-9]{64}$/);
+		expect(captured?.accountWitness).not.toContain("raw-secret");
+		expect(mock.calls[0]?.options?.sessionId).toBe("cohort-routing");
+		expect(mock.calls[0]?.options?.promptCacheKey).toBe("exact-prefix-digest");
+		expect(settled).toBe("ready");
+	});
+
+	it("does not enter the cohort gate without a resolved API key", async () => {
+		const mock = createMockModel({ responses: [{ content: ["ordinary fallback"] }] });
+		let gateCalls = 0;
+		const agent = new Agent({
+			initialState: { model: mock.model, messages: [] },
+			streamFn: mock.stream,
+			sessionId: "ambient-account-routing",
+			promptCacheKey: "must-not-share-anonymous-account",
+			providerPromptCacheGate: async () => {
+				gateCalls++;
+				return {
+					decision: "ready",
+					promptCacheKey: "must-not-reach-provider",
+				};
+			},
+		});
+
+		await agent.prompt("run independently");
+
+		expect(gateCalls).toBe(0);
+		expect(mock.calls[0]?.options?.sessionId).toBe("ambient-account-routing");
+		expect(mock.calls[0]?.options?.promptCacheKey).toBeUndefined();
+		expect(agent.state.messages.at(-1)?.role).toBe("assistant");
+	});
+
+	it("does not cohort a credential resolver that may rotate during dispatch", async () => {
+		const mock = createMockModel({ responses: [{ content: ["independent resolver result"] }] });
+		let gateCalls = 0;
+		const agent = new Agent({
+			initialState: { model: mock.model, messages: [] },
+			streamFn: mock.stream,
+			getApiKey: () => () => "resolved-but-rotatable-key",
+			promptCacheKey: "must-not-survive-account-rotation",
+			providerPromptCacheGate: async () => {
+				gateCalls++;
+				return { decision: "ready", promptCacheKey: "must-not-reach-provider" };
+			},
+		});
+
+		await agent.prompt("run with rotatable auth");
+
+		expect(gateCalls).toBe(0);
+		expect(mock.calls[0]?.options?.promptCacheKey).toBeUndefined();
+		expect(agent.state.messages.at(-1)?.role).toBe("assistant");
+	});
+
+	it("keeps an explicit unsupported cache decision as a no-op", async () => {
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+		const agent = new Agent({
+			initialState: { model: mock.model, messages: [] },
+			streamFn: mock.stream,
+			getApiKey: () => "raw-secret",
+			sessionId: "account-routing-only",
+			promptCacheKey: "must-not-reach-provider",
+			providerPromptCacheGate: async () => ({
+				decision: "unsupported",
+				reason: "provider-cache-unsupported",
+			}),
+		});
+
+		await agent.prompt("run");
+
+		expect(mock.calls[0]?.options?.sessionId).toBe("account-routing-only");
+		expect(mock.calls[0]?.options?.promptCacheKey).toBeUndefined();
+	});
+
+	it("continues the model turn after an ineligible identity decision", async () => {
+		const mock = createMockModel({ responses: [{ content: ["independent result"] }] });
+		const agent = new Agent({
+			initialState: { model: mock.model, messages: [] },
+			streamFn: mock.stream,
+			getApiKey: () => "raw-secret",
+			promptCacheKey: "must-not-reach-provider",
+			providerPromptCacheGate: async () => ({
+				decision: "ineligible",
+				reason: "identity-unavailable",
+			}),
+		});
+
+		await agent.prompt("run independently");
+
+		expect(mock.calls[0]?.options?.promptCacheKey).toBeUndefined();
+		expect(agent.state.messages.at(-1)?.role).toBe("assistant");
 	});
 
 	it("forwards the live cwd from cwdResolver to the stream, overriding the static cwd", async () => {

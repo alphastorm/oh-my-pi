@@ -169,6 +169,79 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[0]?.[0]?.getApiKey).toBe(getApiKey);
 	});
 
+	it("pins cohort auth without merging provider conversation identities", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const settings = Settings.isolated();
+		settings.setModelRole("task", `${model.provider}/${model.id}`);
+		const resolver = vi.fn((_model: Model, _sessionId?: string) => "resolved-account");
+		const modelRegistry = {
+			authStorage: {},
+			refresh: async () => {},
+			getAvailable: () => [model],
+			getApiKey: async () => "test-key",
+			resolver,
+		} as unknown as ModelRegistry;
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const promptCacheCohort = {
+			routingKey: "shared-cohort-routing-key",
+			acquire: async () => ({ decision: "ready" as const, promptCacheKey: "exact-prefix-key" }),
+			release: () => {},
+		};
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, model: ["@task"] },
+			settings,
+			modelRegistry,
+			promptCacheCohort,
+		});
+
+		expect(result.exitCode).toBe(0);
+		const forwarded = spy.mock.calls[0]?.[0];
+		expect(forwarded?.providerSessionId).toBeUndefined();
+		expect(forwarded?.providerPromptCacheKey).toBe(promptCacheCohort.routingKey);
+		expect(forwarded?.providerPromptCacheGate).toBeFunction();
+		expect(forwarded?.getApiKey).toBeFunction();
+		await forwarded?.getApiKey?.(model);
+		expect(resolver.mock.calls[0]?.[1]).toBe(promptCacheCohort.routingKey);
+
+		const unsupported = getBundledModel("google", "gemini-2.5-flash");
+		if (!unsupported) throw new Error("Expected bundled Google Gemini model to exist");
+		await forwarded?.getApiKey?.(unsupported);
+		expect(resolver.mock.calls[1]?.[1]).not.toBe(promptCacheCohort.routingKey);
+		expect(typeof resolver.mock.calls[1]?.[1]).toBe("string");
+	});
+
+	it("leaves an unsupported provider session unchanged", async () => {
+		const model = getBundledModel("google", "gemini-2.5-flash");
+		if (!model) throw new Error("Expected bundled Google Gemini model to exist");
+		const settings = Settings.isolated();
+		settings.setModelRole("task", `${model.provider}/${model.id}`);
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, model: ["@task"] },
+			settings,
+			modelRegistry: createModelRegistry(model),
+			promptCacheCohort: {
+				routingKey: "must-not-route",
+				acquire: async () => ({ decision: "ready" as const, promptCacheKey: "must-not-cache" }),
+				release: () => {},
+			},
+		});
+
+		expect(result.exitCode).toBe(0);
+		const forwarded = spy.mock.calls[0]?.[0];
+		expect(forwarded?.providerSessionId).toBeUndefined();
+		expect(forwarded?.providerPromptCacheKey).toBeUndefined();
+		expect(forwarded?.providerPromptCacheGate).toBeUndefined();
+		expect(forwarded?.getApiKey).toBeUndefined();
+	});
+
 	it("forwards undefined when the parent has not pre-discovered state", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));

@@ -22,6 +22,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import { AgentOutputManager } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -635,6 +636,194 @@ describe("task.batch spawning", () => {
 		expect(text).toContain(":END");
 	});
 
+	it("attaches one shared cache-cohort routing identity to four exact sibling workers", async () => {
+		mockDiscovery();
+		const cohorts: Array<{ routingKey: string } | undefined> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			cohorts.push(options.promptCacheCohort);
+			return makeResult(options.id ?? "?");
+		});
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": true } }));
+		await tool.execute("tc-cache-cohort", {
+			context: "Shared exact-prefix context.",
+			tasks: [
+				{ name: "One", task: "Do one." },
+				{ name: "Two", task: "Do two." },
+				{ name: "Three", task: "Do three." },
+				{ name: "Four", task: "Do four." },
+			],
+		} as TaskParams);
+
+		expect(cohorts).toHaveLength(4);
+		expect(cohorts.every(Boolean)).toBe(true);
+		expect(new Set(cohorts.map(cohort => cohort?.routingKey)).size).toBe(1);
+	});
+
+	it("leaves all workers independent when fewer than four are immediately schedulable", async () => {
+		mockDiscovery();
+		const cohorts: Array<{ routingKey: string } | undefined> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			cohorts.push(options.promptCacheCohort);
+			return makeResult(options.id ?? "?");
+		});
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "async.enabled": false, "task.batch": true, "task.maxConcurrency": 3 },
+			}),
+		);
+		await tool.execute("tc-cache-cohort-capacity", {
+			context: "Shared exact-prefix context.",
+			tasks: [
+				{ name: "One", task: "Do one." },
+				{ name: "Two", task: "Do two." },
+				{ name: "Three", task: "Do three." },
+				{ name: "Four", task: "Do four." },
+			],
+		} as TaskParams);
+
+		expect(cohorts).toHaveLength(4);
+		expect(cohorts.every(cohort => cohort === undefined)).toBe(true);
+	});
+	it("leaves a cache cohort independent when existing work consumes immediate capacity", async () => {
+		mockDiscovery();
+		const started: string[] = [];
+		const cohorts = new Map<string, unknown>();
+		const gates = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			started.push(id);
+			cohorts.set(id, options.promptCacheCohort);
+			const gate = Promise.withResolvers<void>();
+			gates.set(id, gate);
+			await gate.promise;
+			return makeResult(id);
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({
+				manager,
+				settings: { "async.enabled": true, "task.batch": true, "task.maxConcurrency": 4 },
+			}),
+		);
+		await tool.execute("tc-cache-cohort-holder", { name: "Holding", task: "Hold one permit." } as TaskParams);
+		const deadline = Date.now() + 1_000;
+		while (!started.includes("Holding")) {
+			if (Date.now() > deadline) throw new Error("Holding spawn never reached the executor");
+			await Bun.sleep(5);
+		}
+
+		await tool.execute("tc-cache-cohort-live-capacity", {
+			context: "Shared exact-prefix context.",
+			tasks: [
+				{ name: "One", task: "Do one." },
+				{ name: "Two", task: "Do two." },
+				{ name: "Three", task: "Do three." },
+				{ name: "Four", task: "Do four." },
+			],
+		} as TaskParams);
+		while (started.length < 4) {
+			if (Date.now() > deadline) throw new Error("Immediate batch spawns never reached the executor");
+			await Bun.sleep(5);
+		}
+		expect(started).not.toContain("Four");
+
+		gates.get("Holding")!.resolve();
+		while (!started.includes("Four")) {
+			if (Date.now() > deadline) throw new Error("Queued batch spawn never reached the executor");
+			await Bun.sleep(5);
+		}
+		try {
+			expect(["One", "Two", "Three", "Four"].every(id => cohorts.get(id) === undefined)).toBe(true);
+		} finally {
+			for (const id of ["One", "Two", "Three", "Four"]) gates.get(id)!.resolve();
+			await Promise.all(["Holding", "One", "Two", "Three", "Four"].map(id => manager.getJob(id)!.promise));
+		}
+	});
+
+	it("reserves every cohort permit before yielding to a concurrent task call", async () => {
+		mockDiscovery();
+		const started: string[] = [];
+		const cohorts = new Map<string, { routingKey: string } | undefined>();
+		const gates = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			started.push(id);
+			cohorts.set(id, options.promptCacheCohort);
+			const gate = Promise.withResolvers<void>();
+			gates.set(id, gate);
+			await gate.promise;
+			return makeResult(id);
+		});
+
+		const outputManager = new AgentOutputManager(() => null);
+		const allocationReached = Promise.withResolvers<void>();
+		const continueAllocation = Promise.withResolvers<void>();
+		const allocate = outputManager.allocate.bind(outputManager);
+		vi.spyOn(outputManager, "allocate").mockImplementation(async id => {
+			if (id === "One") {
+				allocationReached.resolve();
+				await continueAllocation.promise;
+			}
+			return allocate(id);
+		});
+
+		const manager = createManager();
+		const session = createSession({
+			manager,
+			settings: { "async.enabled": true, "task.batch": true, "task.maxConcurrency": 4 },
+		});
+		session.agentOutputManager = outputManager;
+		const tool = await TaskTool.create(session);
+		const batchCall = tool.execute("tc-cache-cohort-atomic", {
+			context: "Shared exact-prefix context.",
+			tasks: [
+				{ name: "One", task: "Do one." },
+				{ name: "Two", task: "Do two." },
+				{ name: "Three", task: "Do three." },
+				{ name: "Four", task: "Do four." },
+			],
+		} as TaskParams);
+		await allocationReached.promise;
+		const holderCall = tool.execute("tc-cache-cohort-concurrent", {
+			name: "Holding",
+			task: "Compete for one permit.",
+		} as TaskParams);
+		await holderCall;
+		continueAllocation.resolve();
+		await batchCall;
+
+		const batchIds = ["One", "Two", "Three", "Four"];
+		const allIds = [...batchIds, "Holding"];
+		const deadline = Date.now() + 1_000;
+		while (started.length < 4) {
+			if (Date.now() > deadline) throw new Error("Reserved cohort never reached the executor");
+			await Bun.sleep(5);
+		}
+		let failure: unknown;
+		try {
+			expect(started).not.toContain("Holding");
+			expect([...started].sort()).toEqual([...batchIds].sort());
+			const routingKeys = batchIds.map(id => cohorts.get(id)?.routingKey);
+			expect(routingKeys.every(Boolean)).toBe(true);
+			expect(new Set(routingKeys).size).toBe(1);
+		} catch (error) {
+			failure = error;
+		}
+
+		for (const gate of gates.values()) gate.resolve();
+		while (started.length < allIds.length && Date.now() <= deadline) {
+			await Bun.sleep(5);
+			for (const gate of gates.values()) gate.resolve();
+		}
+		for (const gate of gates.values()) gate.resolve();
+		if (started.length < allIds.length) {
+			failure ??= new Error("Queued concurrent spawn never reached the executor");
+			for (const id of allIds) manager.cancel(id);
+		}
+		await Promise.all(allIds.map(id => manager.getJob(id)!.promise));
+		if (failure) throw failure;
+	});
 	it("settles the batch async aggregate when a queued spawn is cancelled mid-flight", async () => {
 		mockDiscovery();
 		const started: string[] = [];

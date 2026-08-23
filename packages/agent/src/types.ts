@@ -141,6 +141,48 @@ export interface SteeringQueueState {
 	source?: SteeringInterruptSource;
 }
 
+export type ProviderPromptCacheSettleOutcome = "ready" | "failed";
+
+/**
+ * Exact provider-facing prefix dimensions available after credential selection
+ * and immediately before transport dispatch. `accountWitness` is a SHA-256
+ * digest; raw credentials and account ids never cross this seam.
+ */
+export interface ProviderPromptCacheRequest {
+	provider: string;
+	model: string;
+	api: string;
+	accountWitness: string;
+	requestProfile: Readonly<Record<string, unknown>>;
+	promptCacheKey?: string;
+	systemPrompt: readonly string[];
+	tools: readonly Tool[];
+	reasoningMode: unknown;
+	serviceTier: ServiceTier | undefined;
+	cacheRetention: SimpleStreamOptions["cacheRetention"];
+}
+
+/** One request's cohort disposition. Only a warmup owner may settle state. */
+export type ProviderPromptCacheLease =
+	| {
+			decision: "warmup-owner";
+			promptCacheKey: string;
+			settle(outcome: ProviderPromptCacheSettleOutcome): void;
+	  }
+	| {
+			decision: "ready";
+			promptCacheKey: string;
+	  }
+	| {
+			decision: "unsupported" | "ineligible";
+			reason: string;
+	  };
+
+export type ProviderPromptCacheGate = (
+	request: ProviderPromptCacheRequest,
+	signal?: AbortSignal,
+) => Promise<ProviderPromptCacheLease>;
+
 /**
  * Configuration for the agent loop.
  */
@@ -159,6 +201,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Used by providers that support session-based caching (e.g., OpenAI Codex).
 	 */
 	sessionId?: string;
+	/** Optional account-scoped prompt-cache warmup gate for this request. */
+	providerPromptCacheGate?: ProviderPromptCacheGate;
+
 
 	/** Absolute wall-clock deadline in Unix epoch milliseconds. */
 	deadline?: number;

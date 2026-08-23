@@ -424,13 +424,15 @@ export interface CreateAgentSessionOptions {
 	 * {@link AgentSession.setTitleSystemPrompt}.
 	 */
 	titleSystemPrompt?: string;
-	/** Optional provider-facing session identifier for prompt caches and sticky auth selection.
-	 * Keeps persisted session files isolated while reusing provider-side caches. */
+	/** Optional provider-facing conversation identifier. Keeps persisted session files isolated. */
 	providerSessionId?: string;
 	/** Optional provider-facing prompt cache key, distinct from request lineage. */
 	providerPromptCacheKey?: string;
 	/** Whether `providerPromptCacheKey` is caller-pinned or inherited from a full fork. */
 	providerPromptCacheKeySource?: "explicit" | "fork";
+	/** Optional task-batch prompt-cache cohort gate, evaluated after credential selection. */
+	providerPromptCacheGate?: AgentOptions["providerPromptCacheGate"];
+
 	/** Absolute wall-clock deadline in Unix epoch milliseconds. */
 	deadline?: number;
 
@@ -3458,6 +3460,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			onResponse,
 			sessionId: providerSessionId,
 			promptCacheKey: providerPromptCacheKey,
+			providerPromptCacheGate: options.providerPromptCacheGate,
 			deadline: options.deadline,
 			transformContext,
 			transformProviderContext,

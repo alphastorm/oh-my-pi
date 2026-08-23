@@ -139,10 +139,21 @@ export class Semaphore {
 	#max: number;
 	#current = 0;
 	#queue: Array<() => void> = [];
-
 	constructor(max: number) {
 		const normalizedMax = normalizeConcurrencyLimit(max);
 		this.#max = normalizedMax > 0 ? normalizedMax : Number.POSITIVE_INFINITY;
+	}
+
+	/**
+	 * Atomically claim `count` permits without queueing or partially acquiring.
+	 * Existing waiters retain priority; callers either reserve the complete set
+	 * they need or leave semaphore state unchanged.
+	 */
+	tryAcquire(count: number): boolean {
+		if (!Number.isSafeInteger(count) || count <= 0) return false;
+		if (this.#queue.length > 0 || this.#current + count > this.#max) return false;
+		this.#current += count;
+		return true;
 	}
 
 	/**

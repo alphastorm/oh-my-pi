@@ -50,6 +50,7 @@ import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
+import { PromptCacheCohortManager, type PromptCacheCohortParticipant, sha256Canonical } from "./prompt-cache-cohort";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
@@ -313,6 +314,8 @@ interface SyncSpawnRef {
 	item: TaskItem;
 	index: number;
 	preAllocatedId?: string;
+	promptCacheCohort?: PromptCacheCohortParticipant;
+	semaphoreReserved?: boolean;
 }
 
 /** Merged view of a sync spawn set's payloads: joined text plus flattened results/usage/paths. */
@@ -585,6 +588,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * spawns and work already parked in the semaphore queue.
 	 */
 	#spawnSemaphore: Semaphore | undefined;
+	#promptCacheReservationActive = false;
 
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
@@ -728,6 +732,49 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
+		const promptCacheCandidateSignatures =
+			batchEnabled && !this.#promptCacheReservationActive
+				? policies.map((policy, index) => {
+						if (itemBlocking[index] || policy.isIsolated || (this.session.extensionPaths?.length ?? 0) > 0) {
+							return undefined;
+						}
+						try {
+							return sha256Canonical({
+								agent: policy.effectiveAgent,
+								modelOverride: policy.modelOverride,
+								parentActiveModelPattern: policy.parentActiveModelPattern,
+								schema: policy.schema,
+								planMode: policy.planMode,
+								enableLsp: policy.enableLsp,
+								enableIrc: policy.enableIrc,
+								context: params.context?.trim() || undefined,
+								effort: normalizedSpawnParams[index]?.effort,
+								taskDepth: this.session.taskDepth ?? 0,
+								restrictToolNames: this.session.restrictToolNames === true,
+								enableMCP: this.session.enableMCP ?? true,
+							});
+						} catch {
+							return undefined;
+						}
+					})
+				: undefined;
+		let promptCacheCohorts = promptCacheCandidateSignatures
+			? PromptCacheCohortManager.global().createBatch(promptCacheCandidateSignatures, () => {
+					this.#promptCacheReservationActive = false;
+				})
+			: spawnItems.map(() => undefined);
+		let promptCachePermitCount = 0;
+		for (const participant of promptCacheCohorts) {
+			if (participant !== undefined) promptCachePermitCount += 1;
+		}
+		if (promptCachePermitCount > 0) {
+			if (this.#getSpawnSemaphore().tryAcquire(promptCachePermitCount)) {
+				this.#promptCacheReservationActive = true;
+			} else {
+				for (const participant of promptCacheCohorts) participant?.release();
+				promptCacheCohorts = spawnItems.map(() => undefined);
+			}
+		}
 
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its
@@ -765,7 +812,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const result = await this.#executeSyncFanout(
 				toolCallId,
 				params,
-				spawnItems.map((item, index) => ({ item, index })),
+				spawnItems.map((item, index) => ({
+					item,
+					index,
+					promptCacheCohort: promptCacheCohorts[index],
+					semaphoreReserved: promptCacheCohorts[index] !== undefined,
+				})),
 				defaultAgent,
 				signal,
 				onUpdate,
@@ -820,7 +872,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				await this.#executeSyncFanout(
 					toolCallId,
 					params,
-					spawnItems.map((item, index) => ({ item, index })),
+					spawnItems.map((item, index) => ({
+						item,
+						index,
+						promptCacheCohort: promptCacheCohorts[index],
+						semaphoreReserved: promptCacheCohorts[index] !== undefined,
+					})),
 					defaultAgent,
 					signal,
 					onUpdate,
@@ -842,17 +899,31 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			index: number;
 			blocking: boolean;
 			progress: AgentProgress;
+			promptCacheCohort?: PromptCacheCohortParticipant;
+			semaphoreReserved: boolean;
 		}> = [];
 		for (const [index, item] of spawnItems.entries()) {
 			const agentType = resolvedAgents[index]!;
 			const policy = policies[index]!;
 			const agentSource = policy.agent.source;
-			const agentId = await outputManager.allocate(item.name?.trim() || generateTaskName());
+			let agentId: string;
+			try {
+				agentId = await outputManager.allocate(item.name?.trim() || generateTaskName());
+			} catch (error) {
+				for (const participant of promptCacheCohorts) {
+					if (participant === undefined) continue;
+					participant.release();
+					this.#releaseSpawnSemaphore();
+				}
+				throw error;
+			}
 			const assignment = (item.task ?? "").trim();
 			spawns.push({
 				agentId,
 				item,
 				index,
+				promptCacheCohort: promptCacheCohorts[index],
+				semaphoreReserved: promptCacheCohorts[index] !== undefined,
 				blocking: itemBlocking[index],
 				progress: {
 					index,
@@ -913,6 +984,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
 					agentId: spawn.agentId,
 					progress: spawn.progress,
+					promptCacheCohort: spawn.promptCacheCohort,
+					semaphoreReserved: spawn.semaphoreReserved,
 					ircEnabled,
 					buildDetails: buildAsyncDetails,
 					onUpdate,
@@ -924,6 +997,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				if (started.length === 0) primaryJobId = jobId;
 				started.push({ agentId: spawn.agentId, jobId });
 			} catch (error) {
+				spawn.promptCacheCohort?.release();
+				if (spawn.semaphoreReserved) this.#releaseSpawnSemaphore();
 				const message = error instanceof Error ? error.message : String(error);
 				failedSchedules.push(`${spawn.agentId}: ${message}`);
 				spawn.progress.status = "failed";
@@ -1010,7 +1085,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			params,
 			defaultAgent,
 			signal,
-			spawns: syncSpawns.map(spawn => ({ item: spawn.item, index: spawn.index, preAllocatedId: spawn.agentId })),
+			spawns: syncSpawns.map(spawn => ({
+				item: spawn.item,
+				index: spawn.index,
+				preAllocatedId: spawn.agentId,
+				promptCacheCohort: spawn.promptCacheCohort,
+				semaphoreReserved: spawn.semaphoreReserved,
+			})),
 			onItemProgress: onUpdate
 				? (index, progress) => {
 						const spawn = spawns.find(candidate => candidate.index === index);
@@ -1072,13 +1153,26 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnParams: TaskParams;
 		agentId: string;
 		progress: AgentProgress;
+		promptCacheCohort?: PromptCacheCohortParticipant;
+		semaphoreReserved: boolean;
 		ircEnabled: boolean;
 		buildDetails: () => TaskToolDetails;
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
 		onSettled?: (failed: boolean) => void;
 	}): string {
-		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
-			options;
+		const {
+			manager,
+			toolCallId,
+			spawnParams,
+			agentId,
+			progress,
+			ircEnabled,
+			buildDetails,
+			onUpdate,
+			onSettled,
+			promptCacheCohort,
+			semaphoreReserved,
+		} = options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			if (aborted) {
 				const ref = AgentRegistry.global().get(agentId);
@@ -1100,7 +1194,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			async ({ signal: runSignal, reportProgress, markRunning }) => {
 				const startedAt = Date.now();
 				const semaphore = this.#getSpawnSemaphore();
-				let semaphoreHeld = false;
+				let semaphoreHeld = semaphoreReserved;
 				// Every release funnels through here: the flag flips before the
 				// release so no path — acquire-time abort, executor failure, or a
 				// future refactor that reorders the branches — can return a permit
@@ -1113,8 +1207,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					this.#releaseSpawnSemaphore();
 				};
 				try {
-					await semaphore.acquire(runSignal);
-					semaphoreHeld = true;
+					if (!semaphoreHeld) {
+						await semaphore.acquire(runSignal);
+						semaphoreHeld = true;
+					}
 				} catch {
 					// Fall through so an acquire-time abort goes through the same
 					// path as the post-acquire race below: progress + onSettled
@@ -1126,6 +1222,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					releasePermit();
 					progress.status = "aborted";
 					onSettled?.(true);
+					promptCacheCohort?.release();
 					throw new Error("Aborted before execution");
 				}
 				try {
@@ -1173,6 +1270,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						progress.index,
 						true,
 						{ invokedAt: startedAt, acquiredAt },
+						promptCacheCohort,
 					);
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
@@ -1223,6 +1321,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
 					releasePermit();
+					promptCacheCohort?.release();
 				}
 			},
 			{
@@ -1255,7 +1354,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const spawn = spawns[0]!;
 			const semaphore = this.#getSpawnSemaphore();
 			const invokedAt = Date.now();
-			await semaphore.acquire(signal);
+			let semaphoreHeld = spawn.semaphoreReserved === true;
+			if (!semaphoreHeld) {
+				await semaphore.acquire(signal);
+				semaphoreHeld = true;
+			}
 			const acquiredAt = Date.now();
 			try {
 				return await this.#executeSync(
@@ -1267,9 +1370,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					spawn.index,
 					false,
 					{ invokedAt, acquiredAt },
+					spawn.promptCacheCohort,
 				);
 			} finally {
-				this.#releaseSpawnSemaphore();
+				if (semaphoreHeld) this.#releaseSpawnSemaphore();
 			}
 		}
 
@@ -1339,11 +1443,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			spawns.length,
 			async (spawn, _position, workerSignal) => {
 				const invokedAt = Date.now();
-				let semaphoreHeld = false;
+				let semaphoreHeld = spawn.semaphoreReserved === true;
 				try {
-					await semaphore.acquire(workerSignal);
-					semaphoreHeld = true;
+					if (!semaphoreHeld) {
+						await semaphore.acquire(workerSignal);
+						semaphoreHeld = true;
+					}
 				} catch (error) {
+					spawn.promptCacheCohort?.release();
 					if (workerSignal.aborted) return undefined;
 					throw error;
 				}
@@ -1364,6 +1471,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						spawn.index,
 						false,
 						{ invokedAt, acquiredAt },
+						spawn.promptCacheCohort,
 					);
 				} finally {
 					if (semaphoreHeld) this.#releaseSpawnSemaphore();
@@ -1372,7 +1480,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			signal,
 		);
 		return results.map((settled, position) => {
-			if (!settled) return undefined;
+			if (!settled) {
+				const spawn = spawns[position];
+				spawn?.promptCacheCohort?.release();
+				if (spawn?.semaphoreReserved) this.#releaseSpawnSemaphore();
+				return undefined;
+			}
 			if (settled.status === "fulfilled") return settled.value;
 			const message = settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
 			const item = spawns[position].item;
@@ -1403,8 +1516,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnIndex = 0,
 		detached = false,
 		launchTiming?: { invokedAt: number; acquiredAt: number },
+		promptCacheCohort?: PromptCacheCohortParticipant,
 	): Promise<AgentToolResult<TaskToolDetails>> {
-		return this.#runSpawn(toolCallId, params, signal, onUpdate, preAllocatedId, spawnIndex, detached, launchTiming);
+		return this.#runSpawn(
+			toolCallId,
+			params,
+			signal,
+			onUpdate,
+			preAllocatedId,
+			spawnIndex,
+			detached,
+			launchTiming,
+			promptCacheCohort,
+		);
 	}
 
 	/** Spawn a fresh subagent and run it to completion. */
@@ -1417,6 +1541,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnIndex = 0,
 		detached = false,
 		launchTiming?: { invokedAt: number; acquiredAt: number },
+		promptCacheCohort?: PromptCacheCohortParticipant,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const assignment = (params.task ?? "").trim();
@@ -1432,6 +1557,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
+				promptCacheCohort,
 				// `name` is the spawn handle: keep it for id allocation when this
 				// path did not pre-reserve one. Do not treat it as a HUD description.
 				identity: { id: preAllocatedId, label: params.name },
@@ -1476,6 +1602,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					...(latestProgress ? { progress: [latestProgress] } : {}),
 				},
 			};
+		} finally {
+			promptCacheCohort?.release();
 		}
 	}
 

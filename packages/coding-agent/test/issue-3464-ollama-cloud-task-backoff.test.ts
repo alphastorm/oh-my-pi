@@ -193,6 +193,28 @@ describe("issue #3464: ollama-cloud task backoff", () => {
 		await next;
 	});
 
+	it("reserves multiple permits atomically or leaves capacity untouched", async () => {
+		const semaphore = new Semaphore(4);
+		await semaphore.acquire();
+
+		expect(semaphore.tryAcquire(4)).toBe(false);
+		expect(semaphore.tryAcquire(3)).toBe(true);
+
+		let admitted = false;
+		const waiter = (async () => {
+			await semaphore.acquire();
+			admitted = true;
+		})();
+		await Bun.sleep(0);
+		expect(admitted).toBe(false);
+
+		semaphore.release();
+		await Bun.sleep(0);
+		expect(admitted).toBe(true);
+		await waiter;
+		for (let i = 0; i < 4; i++) semaphore.release();
+	});
+
 	it("raises the ceiling in place and admits queued waiters without a release", async () => {
 		const semaphore = new Semaphore(1);
 		await semaphore.acquire();

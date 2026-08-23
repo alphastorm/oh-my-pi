@@ -774,6 +774,7 @@ export class AgentSession {
 	#turnIndex = 0;
 	/** Accounting-only state retained across automatic continuations until the true terminal settle. */
 	#terminalReceiptAccumulator: TerminalReceiptAccumulator | undefined;
+	#detachTerminalReceiptObserver: (() => void) | undefined;
 	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
@@ -1327,6 +1328,9 @@ export class AgentSession {
 			}));
 		this.#preparedExtensions = config.preparedExtensions;
 		this.#extensionPaths = config.extensionPaths;
+		this.#detachTerminalReceiptObserver = this.agent.addTransportAttemptObserver(event => {
+			this.#terminalReceiptAccumulator?.recordTransportAttempt(event);
+		});
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
 		const bashHost: BashRunnerHost = {
 			agent: this.agent,
@@ -3088,6 +3092,13 @@ export class AgentSession {
 			sessionId: this.sessionId,
 			turnId: Snowflake.next(),
 			startedAtMs: Date.now(),
+			rateTable: this.model
+				? {
+						provider: this.model.provider,
+						model: this.model.id,
+						rates: this.model.cost,
+					}
+				: undefined,
 		});
 	}
 
@@ -4780,6 +4791,8 @@ export class AgentSession {
 	beginDispose(): void {
 		this.#isDisposed = true;
 		this.#modelDiscoveryAbortController.abort();
+		this.#detachTerminalReceiptObserver?.();
+		this.#detachTerminalReceiptObserver = undefined;
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#detachUsageBeforeQueueDequeue?.();

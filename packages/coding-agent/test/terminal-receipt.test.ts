@@ -10,19 +10,21 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
+	type TerminalReceipt,
 	TerminalReceiptAccumulator,
 	terminalReceiptStatus,
-	type TerminalReceipt,
 } from "@oh-my-pi/pi-coding-agent/session/terminal-receipt";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const reportedUsage: Usage = {
 	input: 70,
 	cacheRead: 30,
-	cacheWrite: 0,
+	cacheWrite: 4,
 	output: 5,
-	totalTokens: 105,
-	cost: { input: 0.01, cacheRead: 0.002, cacheWrite: 0, output: 0.02, total: 0.032 },
+	totalTokens: 109,
+	reasoningTokens: 2,
+	cttl: { ephemeral5m: 4 },
+	cost: { input: 0.01, cacheRead: 0.002, cacheWrite: 0.001, output: 0.02, total: 0.033 },
 };
 
 const missingUsage: Usage = {
@@ -107,6 +109,28 @@ describe("terminal receipt accounting", () => {
 			sessionId: "session-1",
 			turnId: "turn-1",
 			startedAtMs: 1_000,
+			rateTable: {
+				provider: "openai",
+				model: "gpt-5",
+				rates: { input: 1, output: 4, cacheRead: 0.1, cacheWrite: 1.25 },
+			},
+		});
+		accumulator.recordTransportAttempt({
+			type: "start",
+			attemptId: "attempt-1",
+			provider: "openai",
+			model: "gpt-5",
+			startedAtMs: 1_010,
+		});
+		accumulator.recordTransportAttempt({
+			type: "settle",
+			attemptId: "attempt-1",
+			provider: "openai",
+			model: "gpt-5",
+			endedAtMs: 1_050,
+			status: "success",
+			cause: "completed",
+			usage: reportedUsage,
 		});
 		accumulator.recordAssistant({ usage: reportedUsage, duration: 40 });
 		accumulator.recordToolStart("call-1", 1_100);
@@ -125,6 +149,36 @@ describe("terminal receipt accounting", () => {
 		expect(receipt?.tokens.cachedInput).toEqual({ status: "available", value: 30 });
 		expect(receipt?.tokens.uncachedInput).toEqual({ status: "available", value: 70 });
 		expect(receipt?.tokens.output).toEqual({ status: "available", value: 5 });
+		expect(receipt?.tokens.reasoning).toEqual({ status: "available", value: 2 });
+		expect(receipt?.tokens.cacheWrite).toEqual({ status: "available", value: 4 });
+		expect(receipt?.rateTable.status).toBe("available");
+		expect(receipt?.rateTable.status === "available" ? receipt.rateTable.value.rates : undefined).toEqual({
+			input: 1,
+			cachedInput: 0.1,
+			cacheWrite: 1.25,
+			output: 4,
+			reasoning: 4,
+		});
+		expect(receipt?.rateTable.status === "available" ? receipt.rateTable.value.reasoningRateBasis : undefined).toBe(
+			"catalog-output-token-rate",
+		);
+		expect(receipt?.rateTable.status === "available" ? receipt.rateTable.value.effectiveAt : undefined).toBe(
+			"1970-01-01T00:00:00.000Z",
+		);
+		expect(receipt?.attempts).toHaveLength(1);
+		expect(receipt?.attempts[0]).toMatchObject({
+			ordinal: 1,
+			status: { status: "available", value: "success" },
+			cause: { status: "available", value: "completed" },
+			costUsd: { status: "available", value: 0.033 },
+			billable: { status: "unavailable", reason: "not-observable" },
+		});
+		expect(receipt?.attemptCoverage).toBe("auth-dispatch");
+		expect(receipt?.billingUncertain).toEqual({
+			flag: true,
+			reasons: ["physical-attempt-coverage-partial", "attempt-billability-unknown"],
+		});
+		expect(receipt?.costClassification).toBe("lower-bound");
 		expect(receipt?.durationsMs.model).toEqual({ status: "available", value: 40 });
 		expect(receipt?.durationsMs.tool).toEqual({ status: "available", value: 20 });
 		expect(receipt?.durationsMs.local).toEqual({ status: "available", value: 140 });
@@ -147,6 +201,220 @@ describe("terminal receipt accounting", () => {
 		expect(missingReceipt?.durationsMs.model).toEqual({ status: "unavailable", reason: "not-reported" });
 		expect(missingReceipt?.durationsMs.local).toEqual({ status: "unavailable", reason: "not-observable" });
 		expect(missingReceipt?.promptCacheDigest).toEqual({ status: "unavailable", reason: "not-observable" });
+		expect(missingReceipt?.tokens.reasoning).toEqual({
+			status: "unavailable",
+			reason: "provider-unreported",
+		});
+		expect(missingReceipt?.tokens.cacheWrite).toEqual({
+			status: "unavailable",
+			reason: "provider-unreported",
+		});
+		expect(missingReceipt?.attemptCoverage).toBe("unavailable");
+		expect(missingReceipt?.costClassification).toBe("unavailable");
+		expect(missingReceipt?.billingUncertain.reasons).toContain("physical-attempt-observation-unavailable");
+	});
+
+	it("records replay-safe failed attempts without inventing usage or billability", () => {
+		const accumulator = new TerminalReceiptAccumulator({
+			sessionId: "session-attempts",
+			turnId: "turn-attempts",
+			startedAtMs: 7_000,
+			rateTable: {
+				provider: "openai",
+				model: "gpt-5",
+				rates: { input: 1, output: 4, cacheRead: 0.1, cacheWrite: 1.25 },
+			},
+		});
+		accumulator.recordTransportAttempt({
+			type: "start",
+			attemptId: "failed",
+			provider: "openai",
+			model: "gpt-5",
+			startedAtMs: 7_010,
+		});
+		accumulator.recordTransportAttempt({
+			type: "settle",
+			attemptId: "failed",
+			provider: "openai",
+			model: "gpt-5",
+			endedAtMs: 7_020,
+			status: "error",
+			cause: "credential-retry",
+		});
+		accumulator.recordTransportAttempt({
+			type: "start",
+			attemptId: "successful",
+			provider: "openai",
+			model: "gpt-5",
+			startedAtMs: 7_030,
+		});
+		accumulator.recordTransportAttempt({
+			type: "settle",
+			attemptId: "successful",
+			provider: "openai",
+			model: "gpt-5",
+			endedAtMs: 7_060,
+			status: "success",
+			cause: "completed",
+			usage: reportedUsage,
+		});
+		accumulator.recordAssistant({ usage: reportedUsage, duration: 30 });
+
+		const receipt = accumulator.finish({
+			endedAtMs: 7_070,
+			provider: "openai",
+			model: "gpt-5",
+			compactionEpoch: 0,
+			terminalStatus: "success",
+		});
+
+		expect(receipt?.attempts.map(attempt => [attempt.ordinal, attempt.status, attempt.cause])).toEqual([
+			[1, { status: "available", value: "error" }, { status: "available", value: "credential-retry" }],
+			[2, { status: "available", value: "success" }, { status: "available", value: "completed" }],
+		]);
+		expect(receipt?.attempts[0]?.usage).toEqual({ status: "unavailable", reason: "not-reported" });
+		expect(receipt?.attempts[0]?.costUsd).toEqual({ status: "unavailable", reason: "not-reported" });
+		expect(receipt?.attempts[0]?.billable).toEqual({ status: "unavailable", reason: "not-observable" });
+		expect(receipt?.billingUncertain.reasons).toEqual([
+			"physical-attempt-coverage-partial",
+			"attempt-usage-unreported",
+			"attempt-cost-unreported",
+			"attempt-billability-unknown",
+		]);
+		expect(receipt?.costClassification).toBe("lower-bound");
+	});
+
+	it("materializes unsettled attempts without ordinal gaps or invented lifecycle outcomes", () => {
+		const accumulator = new TerminalReceiptAccumulator({
+			sessionId: "session-open-attempt",
+			turnId: "turn-open-attempt",
+			startedAtMs: 8_000,
+		});
+		accumulator.recordTransportAttempt({
+			type: "start",
+			attemptId: "open",
+			provider: "openai",
+			model: "gpt-5",
+			startedAtMs: 8_010,
+		});
+		accumulator.recordTransportAttempt({
+			type: "start",
+			attemptId: "settled",
+			provider: "openai",
+			model: "gpt-5",
+			startedAtMs: 8_020,
+		});
+		accumulator.recordTransportAttempt({
+			type: "settle",
+			attemptId: "settled",
+			provider: "openai",
+			model: "gpt-5",
+			endedAtMs: 8_030,
+			status: "success",
+			cause: "completed",
+			usage: reportedUsage,
+		});
+		accumulator.recordAssistant({ usage: reportedUsage, duration: 10 });
+
+		const receipt = accumulator.finish({
+			endedAtMs: 8_040,
+			provider: "openai",
+			model: "gpt-5",
+			compactionEpoch: 0,
+			terminalStatus: "cancelled",
+		});
+
+		expect(receipt?.attempts.map(attempt => attempt.ordinal)).toEqual([1, 2]);
+		expect(receipt?.attempts[0]).toMatchObject({
+			status: { status: "unavailable", reason: "not-observable" },
+			cause: { status: "unavailable", reason: "not-observable" },
+			usage: { status: "unavailable", reason: "not-reported" },
+			costUsd: { status: "unavailable", reason: "not-reported" },
+			billable: { status: "unavailable", reason: "not-observable" },
+			durationMs: { status: "unavailable", reason: "not-observable" },
+		});
+		expect(receipt?.attempts[1]).toMatchObject({
+			status: { status: "available", value: "success" },
+			cause: { status: "available", value: "completed" },
+		});
+		expect(receipt?.billingUncertain.reasons).toContain("attempt-lifecycle-incomplete");
+	});
+
+	it("keeps positive aggregate cost as a lower bound while marking zero provider cost unreported", () => {
+		const zeroCostUsage: Usage = {
+			...reportedUsage,
+			cost: { ...reportedUsage.cost, total: 0 },
+		};
+		const accumulator = new TerminalReceiptAccumulator({
+			sessionId: "session-mixed-cost",
+			turnId: "turn-mixed-cost",
+			startedAtMs: 9_000,
+		});
+		for (const [index, usage] of [reportedUsage, zeroCostUsage].entries()) {
+			const attemptId = `cost-${index + 1}`;
+			accumulator.recordTransportAttempt({
+				type: "start",
+				attemptId,
+				provider: "openai",
+				model: "gpt-5",
+				startedAtMs: 9_010 + index * 10,
+			});
+			accumulator.recordTransportAttempt({
+				type: "settle",
+				attemptId,
+				provider: "openai",
+				model: "gpt-5",
+				endedAtMs: 9_015 + index * 10,
+				status: "success",
+				cause: "completed",
+				usage,
+			});
+			accumulator.recordAssistant({ usage, duration: 5 });
+		}
+
+		const receipt = accumulator.finish({
+			endedAtMs: 9_040,
+			provider: "openai",
+			model: "gpt-5",
+			compactionEpoch: 0,
+			terminalStatus: "success",
+		});
+
+		expect(receipt?.costEquivalentUsd).toEqual({ status: "available", value: 0.033 });
+		expect(receipt?.attempts[0]?.costUsd).toEqual({ status: "available", value: 0.033 });
+		expect(receipt?.attempts[1]?.costUsd).toEqual({ status: "unavailable", reason: "not-reported" });
+		expect(receipt?.billingUncertain.reasons).toContain("aggregate-cost-unreported");
+		expect(receipt?.billingUncertain.reasons).toContain("attempt-cost-unreported");
+		expect(receipt?.costClassification).toBe("lower-bound");
+	});
+
+	it("rounds rate-table provenance to a UTC day and declares the reasoning-rate basis", () => {
+		const startedAtMs = Date.UTC(2026, 7, 9, 15, 42, 11, 123);
+		const accumulator = new TerminalReceiptAccumulator({
+			sessionId: "session-rate-time",
+			turnId: "turn-rate-time",
+			startedAtMs,
+			rateTable: {
+				provider: "openai",
+				model: "gpt-5",
+				rates: { input: 1, output: 4, cacheRead: 0.1, cacheWrite: 1.25 },
+			},
+		});
+		const receipt = accumulator.finish({
+			endedAtMs: startedAtMs + 1,
+			provider: "openai",
+			model: "gpt-5",
+			compactionEpoch: 0,
+			terminalStatus: "success",
+		});
+
+		expect(receipt?.rateTable).toMatchObject({
+			status: "available",
+			value: {
+				effectiveAt: "2026-08-09T00:00:00.000Z",
+				reasoningRateBasis: "catalog-output-token-rate",
+			},
+		});
 	});
 	it("unions overlapping tool intervals instead of summing per-tool spans", () => {
 		const accumulator = new TerminalReceiptAccumulator({
@@ -305,7 +573,7 @@ describe("AgentSession terminal receipt seam", () => {
 			await session.waitForIdle();
 
 			expect(receipts).toHaveLength(1);
-			expect(receipts[0]?.schemaVersion).toBe(1);
+			expect(receipts[0]?.schemaVersion).toBe(2);
 			expect(receipts[0]?.terminalStatus).toBe(expectedStatus);
 			expect(receipts[0]?.sessionId).toBe(session.sessionId);
 			expect(JSON.stringify(receipts[0])).not.toContain(privatePrompt);

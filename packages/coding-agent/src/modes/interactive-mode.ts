@@ -53,8 +53,8 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "../capability";
+import { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
-import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
@@ -708,7 +708,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	fileSlashCommands: Set<string> = new Set();
 	skillCommands: Map<string, Skill> = new Map();
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
-	collabHost?: CollabHost;
+	readonly collabController: CollabController;
 	collabGuest?: CollabGuestLink;
 
 	#pendingCommandOutput: Component[] = [];
@@ -1015,6 +1015,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const skillCommandList = this.#rebuildSkillCommandsFromSession();
 
+		this.collabController = new CollabController(this);
 		const builtinCommands: SlashCommand[] = buildTuiBuiltinSlashCommands({ ctx: this }).map(cmd => ({
 			...cmd,
 			icon: getSlashCommandTypeIcon(cmd.icon ?? "action"),
@@ -1268,6 +1269,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.sessionManager.onSessionNameChanged(() => {
 				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 				this.#handleSessionAccentInputsChanged();
+				void this.collabController.refreshMetadata();
 			}),
 		);
 		this.#syncEditorMaxHeight();
@@ -1298,7 +1300,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.#liveCommandController.stop();
 			await this.#quiesceVibeForSessionSwitch();
 		});
-		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
+		this.session.setSessionSwitchReconciler?.(async phase => {
+			if (phase === "before") {
+				await this.collabController.prepareActiveSessionReplacement();
+				return;
+			}
+			await this.collabController.restoreActiveSession();
+			await this.#reconcileModeFromSession({ preserveActiveGoal: true });
+		});
 		await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
 
 		// Brand-new sessions optionally start in plan mode when the user has made it
@@ -1341,6 +1350,9 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.#updateWelcomeModel();
 				}
 				void this.#handleGoalSessionEvent(event);
+			}),
+			this.sessionManager.onModelChanged(() => {
+				void this.collabController.refreshMetadata();
 			}),
 			onStatusLineSessionAccentChanged(() => {
 				this.#syncStatusLineSettings();
@@ -1420,6 +1432,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			// replay with the newly detected palette.
 			onTerminalAppearanceChange(mode, appearanceRefreshWasRequested ? {} : undefined);
 		});
+
+		// Collaboration starts only after the interactive context and session are ready.
+		await this.collabController.autoStart();
 	}
 
 	/** Reload the title-generation system prompt override for the provided working
@@ -1623,6 +1638,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.statusLine.applyCwdChange();
+		await this.collabController.refreshMetadata();
 		return true;
 	}
 
@@ -4720,6 +4736,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async shutdown(): Promise<void> {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
+		await this.collabController.shutdown();
 
 		await this.#liveCommandController.stop();
 

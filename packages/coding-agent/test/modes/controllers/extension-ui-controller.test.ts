@@ -45,6 +45,10 @@ function makeHarness() {
 			extensionRunner: undefined,
 			setUsageFallbackConfirmer: vi.fn(),
 		},
+		collabController: {
+			host: undefined,
+			beginInputRequired: vi.fn(() => vi.fn()),
+		},
 		setToolUIContext(context: ExtensionUIContext, hasUI: boolean): void {
 			expect(hasUI).toBe(true);
 			uiContext = context;

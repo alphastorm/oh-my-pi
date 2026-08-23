@@ -178,7 +178,6 @@ function makeHostContext(snapshot: OversizedSnapshot): HostHarness {
 		},
 		ui: { requestRender: () => {} },
 		showStatus: (msg: string) => statusMessages.push(msg),
-		collabHost: undefined,
 	} as unknown as InteractiveModeContext;
 	return { ctx, statusMessages };
 }

@@ -473,7 +473,7 @@ function makeHostContext(): InteractiveModeContext {
 		},
 		ui: { requestRender: () => {} },
 		showStatus: () => {},
-		collabHost: undefined,
+		collabController: { host: undefined },
 	} as unknown as InteractiveModeContext;
 }
 
@@ -650,7 +650,7 @@ describe("collab host dialog vs teardown (#4049 follow-up)", () => {
 		const ctx = makeHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
-		ctx.collabHost = host;
+		Object.assign(ctx.collabController, { host });
 		const controller = new StubDialogController(ctx);
 		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
 		const welcome = await guest.nextFrame();
@@ -731,7 +731,7 @@ describe("guest ask unavailable literal answer (#4375)", () => {
 		const ctx = makeHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
-		ctx.collabHost = host;
+		Object.assign(ctx.collabController, { host });
 		try {
 			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
 			const welcome = await guest.nextFrame();
@@ -815,7 +815,7 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 		const ctx = makeAskHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
-		ctx.collabHost = host;
+		Object.assign(ctx.collabController, { host });
 		const controller = new ExtensionUiController(ctx);
 		try {
 			const guest = await joinRawGuest(host.link, COLLAB_PROTO);

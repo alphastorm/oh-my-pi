@@ -101,7 +101,7 @@ export class ExtensionUiController {
 		// Create and set hook & tool UI context
 		const uiContext: ExtensionUIContext = {
 			timeoutStartsOnPresentation: true,
-			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
+			select: (title, options, dialogOptions) => this.showHookSelector(title, options, dialogOptions),
 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
@@ -614,7 +614,7 @@ export class ExtensionUiController {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
-		const host = this.ctx.collabHost;
+		const host = this.ctx.collabController.host;
 		if (!host) return this.#showLocalAskDialog(questions, dialogOptions);
 		const localAbort = new AbortController();
 		const remoteAbort = new AbortController();
@@ -743,7 +743,7 @@ export class ExtensionUiController {
 		signal: AbortSignal | undefined,
 		local: (signal: AbortSignal | undefined) => Promise<string | undefined>,
 	): Promise<string | undefined> {
-		const host = this.ctx.collabHost;
+		const host = this.ctx.collabController.host;
 		if (!host) return local(signal);
 		const localAbort = new AbortController();
 		const remoteAbort = new AbortController();
@@ -883,7 +883,7 @@ export class ExtensionUiController {
 	}
 
 	async #requestGuestUiString(request: CollabUiRequestDraft, signal: AbortSignal): Promise<GuestUiResult> {
-		const host = this.ctx.collabHost;
+		const host = this.ctx.collabController.host;
 		if (!host) return { kind: "unavailable" };
 		const remote = host.requestGuestUi(request, signal);
 		if (!remote) return { kind: "unavailable" };

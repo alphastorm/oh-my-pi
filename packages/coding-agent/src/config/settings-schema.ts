@@ -2328,6 +2328,34 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Collab
+	"collab.autoStart": {
+		type: "enum",
+		values: ["off", "view", "control"] as const,
+		default: "off",
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Automatic Collaboration",
+			description: "Start collaboration after interactive session initialization and publish view or control access",
+			options: [
+				{ value: "off", label: "Off" },
+				{ value: "view", label: "View only" },
+				{ value: "control", label: "View and control" },
+			],
+		},
+	},
+
+	"collab.registryEndpoint": {
+		type: "string",
+		default: "auto",
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Session Gateway Registry",
+			description: "Local IPC endpoint: auto, off, an absolute Unix socket, or a Windows named pipe",
+		},
+	},
+
 	"collab.relayUrl": {
 		type: "string",
 		default: DEFAULT_RELAY_URL,

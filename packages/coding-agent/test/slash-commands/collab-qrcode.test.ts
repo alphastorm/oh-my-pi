@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
+import type { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
+import type { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -24,20 +25,17 @@ afterAll(() => {
 	resetSettingsForTest();
 });
 
-function fakeHost(options?: {
-	webLink?: string;
-	webViewLink?: string;
-}): NonNullable<InteractiveModeContext["collabHost"]> {
+function fakeHost(options?: { webLink?: string; webViewLink?: string }): CollabHost {
 	return {
 		link: "relay.example.com/r/full-control",
 		viewLink: "relay.example.com/r/read-only",
 		webLink: options?.webLink ?? "https://my.omp.sh/#full-control",
 		webViewLink: options?.webViewLink ?? "https://my.omp.sh/#read-only",
 		participants: [{ name: "host", role: "host" }],
-	} as unknown as NonNullable<InteractiveModeContext["collabHost"]>;
+	} as unknown as CollabHost;
 }
 
-function createRuntimeHarness(options?: { collabHost?: NonNullable<InteractiveModeContext["collabHost"]> }) {
+function createRuntimeHarness(options?: { collabHost?: CollabHost }) {
 	const setText = vi.fn();
 	const showStatus = vi.fn();
 	const showError = vi.fn();
@@ -47,16 +45,39 @@ function createRuntimeHarness(options?: { collabHost?: NonNullable<InteractiveMo
 		if (key === "collab.webUrl") return "";
 		return "";
 	});
+	let collabHost = options?.collabHost;
 	const ctx = {
 		editor: { setText },
 		showStatus,
 		showError,
 		present,
 		settings: { get: settingsGet },
-		collabHost: options?.collabHost,
 	} as unknown as InteractiveModeContext;
+	const start = vi.fn();
+	const collabController = {
+		get host() {
+			return collabHost;
+		},
+		start(startOptions: {
+			relayUrl?: string;
+			webUrl?: string;
+			publish?: "view" | "control";
+			forceReplacement?: boolean;
+		}) {
+			start(startOptions);
+			collabHost = fakeHost({
+				webLink: "https://my.omp.sh/#started-full",
+				webViewLink: "https://my.omp.sh/#started-view",
+			});
+			return Promise.resolve();
+		},
+		resumePublication: vi.fn().mockResolvedValue(undefined),
+		stop: vi.fn(),
+	} as unknown as CollabController;
+	Object.assign(ctx, { collabController });
 	return {
 		ctx,
+		start,
 		setText,
 		showStatus,
 		showError,
@@ -65,30 +86,19 @@ function createRuntimeHarness(options?: { collabHost?: NonNullable<InteractiveMo
 	};
 }
 
-function mockStartedHostLinks() {
-	return vi.spyOn(CollabHost.prototype, "start").mockImplementation(function (this: CollabHost): Promise<void> {
-		Object.defineProperties(this, {
-			link: { value: "relay.example.com/r/full-control", configurable: true },
-			viewLink: { value: "relay.example.com/r/read-only", configurable: true },
-			webLink: { value: "https://my.omp.sh/#started-full", configurable: true },
-			webViewLink: { value: "https://my.omp.sh/#started-view", configurable: true },
-			participants: { value: [{ name: "host", role: "host" as const }], configurable: true },
-		});
-		return Promise.resolve();
-	});
-}
-
 describe("/collab slash command QR code rendering", () => {
 	it("starts hosting and prints a one-shot full-control QR", async () => {
-		const startSpy = mockStartedHostLinks();
 		const harness = createRuntimeHarness();
 
 		const handled = await executeBuiltinSlashCommand("/collab", harness.runtime);
 
 		expect(handled).toBe(true);
 		expect(harness.setText).toHaveBeenCalledWith("");
-		expect(startSpy).toHaveBeenCalledWith("wss://relay.example.com", "");
-		expect(harness.ctx.collabHost).toBeInstanceOf(CollabHost);
+		expect(harness.start).toHaveBeenCalledWith({
+			relayUrl: "wss://relay.example.com",
+			webUrl: "",
+			publish: "control",
+		});
 		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
 		expect(statusText).toContain("my.omp.sh/#started-full");
 		const presented = harness.present.mock.calls[0]?.[0] as readonly unknown[];
@@ -100,14 +110,16 @@ describe("/collab slash command QR code rendering", () => {
 	});
 
 	it("starts hosting and prints a one-shot read-only QR", async () => {
-		const startSpy = mockStartedHostLinks();
 		const harness = createRuntimeHarness();
 
 		const handled = await executeBuiltinSlashCommand("/collab view", harness.runtime);
 
 		expect(handled).toBe(true);
-		expect(startSpy).toHaveBeenCalledWith("wss://relay.example.com", "");
-		expect(harness.ctx.collabHost).toBeInstanceOf(CollabHost);
+		expect(harness.start).toHaveBeenCalledWith({
+			relayUrl: "wss://relay.example.com",
+			webUrl: "",
+			publish: "view",
+		});
 		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
 		expect(statusText).toContain("my.omp.sh/#started-view");
 		expect(statusText).not.toContain("my.omp.sh/#started-full");
@@ -167,6 +179,20 @@ describe("/collab slash command QR code rendering", () => {
 		expect(firstRow).toContain("Collab session active");
 		expect(firstRow).toContain("Join in browser");
 		expect(firstRow).toContain(webLink);
+	});
+
+	it("forces replacement when an explicit relay matches the active relay", async () => {
+		const harness = createRuntimeHarness({ collabHost: fakeHost() });
+
+		const handled = await executeBuiltinSlashCommand("/collab wss://relay.example.com", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.start).toHaveBeenCalledWith({
+			relayUrl: "wss://relay.example.com",
+			webUrl: "",
+			publish: "control",
+			forceReplacement: true,
+		});
 	});
 });
 

@@ -1,7 +1,8 @@
 import { Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { CollabGuestLink } from "../collab/guest";
-import { CollabHost } from "../collab/host";
+import type { CollabHost } from "../collab/host";
+import type { CollabPublicationState } from "../collab/registry-publisher";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import { parseExportArgs } from "../export/html/args";
@@ -15,6 +16,26 @@ import { CollabQrCodeComponent, collabBrowserLink } from "./helpers/collab-qrcod
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
 
+/**
+ * Directory publication line for `/collab status`. A host can be perfectly
+ * healthy on the relay while its gateway publication is retrying or latched off,
+ * and that state is otherwise invisible.
+ */
+function collabPublicationHint(state: CollabPublicationState): string {
+	const bullet = theme.fg("accent", theme.format.bullet);
+	const label = theme.fg("muted", "Session directory:");
+	if (state.kind === "publishing") return ` ${bullet} ${label} publishing`;
+	if (state.kind === "retrying") {
+		return ` ${bullet} ${label} retrying (attempt ${state.attempt}: ${state.reason})`;
+	}
+	if (state.kind === "disabled") {
+		return [
+			` ${bullet} ${label} ${theme.fg("warning", `disabled — ${state.reason}`)}`,
+			theme.fg("dim", "Run /collab to clear it and retry publication."),
+		].join("\n");
+	}
+	return ` ${bullet} ${label} not published`;
+}
 /** Join hint printed by /collab: compact terminal link + clickable browser deep link. */
 function collabLinkHint(host: CollabHost, heading: string, view = false): string {
 	const bullet = theme.fg("accent", theme.format.bullet);
@@ -261,8 +282,8 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			if (runtime.ctx.collabHost) {
-				return `Collab: hosting (${Math.max(0, runtime.ctx.collabHost.participants.length - 1)} guests)`;
+			if (runtime.ctx.collabController.host) {
+				return `Collab: hosting (${Math.max(0, runtime.ctx.collabController.host.participants.length - 1)} guests)`;
 			}
 			if (runtime.ctx.collabGuest?.readOnly) return "Collab: read-only guest";
 			if (runtime.ctx.collabGuest) return "Collab: guest";
@@ -274,20 +295,26 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			const args = command.args.trim();
 			const { verb, rest } = parseSubcommand(args);
 			if (verb === "stop") {
-				if (!ctx.collabHost) {
+				if (!ctx.collabController.host) {
 					ctx.showStatus("Not hosting a collab session");
 					return;
 				}
-				await ctx.collabHost.stop("host stopped");
+				await ctx.collabController.stop("host stopped");
 				ctx.showStatus("Collab stopped");
 				return;
 			}
 			if (verb === "status") {
-				if (ctx.collabHost) {
-					const names = ctx.collabHost.participants.map(p =>
+				if (ctx.collabController.host) {
+					const names = ctx.collabController.host.participants.map(p =>
 						p.role === "host" ? `${p.name} (host)` : p.readOnly ? `${p.name} (view-only)` : p.name,
 					);
-					ctx.showStatus(`Collab: ${names.join(", ")} — ${collabBrowserLink(ctx.collabHost.webLink)}`);
+					ctx.showStatus(
+						[
+							`Collab: ${names.join(", ")} — ${collabBrowserLink(ctx.collabController.host.webLink)}`,
+							collabPublicationHint(ctx.collabController.publicationState()),
+						].join("\n"),
+						{ dim: false },
+					);
 				} else if (ctx.collabGuest) {
 					ctx.showStatus(
 						ctx.collabGuest.readOnly
@@ -305,16 +332,15 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			}
 			const knownStartVerb = verb === "start" || verb === "view";
 			const view = verb === "view";
-			if (ctx.collabHost) {
-				showCollabLink(
-					ctx,
-					ctx.collabHost,
-					view ? "Read-only collab session active" : "Collab session active",
-					view,
-				);
+			const explicitUrl = knownStartVerb ? rest : args;
+			const existingHost = ctx.collabController.host;
+			if (existingHost && !explicitUrl) {
+				// A latched publisher is only recoverable through an explicit /collab,
+				// and an already-hosting session lands here rather than in start().
+				await ctx.collabController.resumePublication();
+				showCollabLink(ctx, existingHost, view ? "Read-only collab session active" : "Collab session active", view);
 				return;
 			}
-			const explicitUrl = knownStartVerb ? rest : args;
 			const relayInput = explicitUrl || ctx.settings.get("collab.relayUrl") || "";
 			if (!relayInput) {
 				ctx.showError(
@@ -325,14 +351,22 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			// Scheme-less relay args default to wss (ws:// must be spelled out for localhost).
 			const relayUrl = relayInput.includes("://") ? relayInput : `wss://${relayInput}`;
 			const webUrl = ctx.settings.get("collab.webUrl") || "";
-			const host = new CollabHost(ctx);
 			try {
-				await host.start(relayUrl, webUrl);
+				await ctx.collabController.start({
+					relayUrl,
+					webUrl,
+					publish: view ? "view" : "control",
+					...(explicitUrl ? { forceReplacement: true } : {}),
+				});
 			} catch (err) {
 				ctx.showError(`Failed to start collab session: ${errorMessage(err)}`);
 				return;
 			}
-			ctx.collabHost = host;
+			const host = ctx.collabController.host;
+			if (!host) {
+				ctx.showError("Failed to start collab session");
+				return;
+			}
 			showCollabLink(ctx, host, "Collab session started!", view);
 		},
 	},
@@ -350,7 +384,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				ctx.showError("Usage: /join <link>");
 				return;
 			}
-			if (ctx.collabHost) {
+			if (ctx.collabController.host) {
 				ctx.showError("Stop hosting first (/collab stop)");
 				return;
 			}
@@ -370,7 +404,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		icon: "signOut",
 		description: "Leave the collab session",
 		getTuiAutocompleteDescription: runtime => {
-			if (runtime.ctx.collabHost) return "Leave collab: hosting";
+			if (runtime.ctx.collabController.host) return "Leave collab: hosting";
 			if (runtime.ctx.collabGuest) return "Leave collab: guest";
 			return "Leave collab: not in collab";
 		},
@@ -381,8 +415,8 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				await ctx.collabGuest.leave("left");
 				return;
 			}
-			if (ctx.collabHost) {
-				await ctx.collabHost.stop("host stopped");
+			if (ctx.collabController.host) {
+				await ctx.collabController.stop("host stopped");
 				ctx.showStatus("Collab stopped");
 				return;
 			}

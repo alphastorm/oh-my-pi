@@ -260,6 +260,23 @@ describe("AgentSession bash session ownership", () => {
 		expect(spawnHook).not.toHaveBeenCalled();
 	});
 
+	it("brackets session identity replacement with reconciler phases", async () => {
+		createSession();
+		const previousSessionId = session.sessionId;
+		const observations: Array<{ phase: "before" | "after"; sessionId: string }> = [];
+		session.setSessionSwitchReconciler(async phase => {
+			observations.push({ phase, sessionId: session.sessionId });
+		});
+
+		await session.newSession();
+
+		expect(observations).toEqual([
+			{ phase: "before", sessionId: previousSessionId },
+			{ phase: "after", sessionId: session.sessionId },
+		]);
+		expect(session.sessionId).not.toBe(previousSessionId);
+	});
+
 	it("keeps a queued bash result on the branch discarded by an empty stop", async () => {
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 		let returnEmptyStop = true;

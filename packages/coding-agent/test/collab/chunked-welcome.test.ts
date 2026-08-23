@@ -82,7 +82,6 @@ function makeHostContext(snapshot: SizedSnapshot): InteractiveModeContext {
 		},
 		ui: { requestRender: () => {} },
 		showStatus: () => {},
-		collabHost: undefined,
 	};
 	return ctx as unknown as InteractiveModeContext;
 }

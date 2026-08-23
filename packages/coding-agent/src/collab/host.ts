@@ -140,6 +140,8 @@ export class CollabHost {
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
+	/** Invoked after an unrecoverable relay close tears down this host. */
+	onFatal?: (reason: string) => void;
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
@@ -247,7 +249,7 @@ export class CollabHost {
 			if (willReconnect) {
 				this.#ctx.showStatus(`Collab relay connection lost (${reason}), reconnecting…`, { dim: true });
 			} else {
-				void this.#teardown();
+				void this.#teardown().finally(() => this.onFatal?.(reason));
 				this.#ctx.session.emitNotice("warning", `Collab ended: ${reason}`, "collab");
 			}
 		};
@@ -322,7 +324,6 @@ export class CollabHost {
 		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
-		this.#ctx.collabHost = undefined;
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#ctx.ui.requestRender();
 	}

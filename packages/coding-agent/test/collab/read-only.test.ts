@@ -75,7 +75,6 @@ function makeHostContext(): HostHarness {
 		},
 		ui: { requestRender: () => {} },
 		showStatus: () => {},
-		collabHost: undefined,
 	} as unknown as InteractiveModeContext;
 	const nextPrompt = (): Promise<{ from?: string }> => {
 		const { promise, resolve } = Promise.withResolvers<{ from?: string }>();

@@ -1691,6 +1691,7 @@ export class AgentSession {
 			thinkingLevel: () => this.thinkingLevel,
 			sessionId: () => this.sessionId,
 			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
+
 			setSkipPostTurnMaintenance: timestamp => {
 				this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = timestamp;
 				if (timestamp === undefined) this.#skippedPostTurnSpeculationCompletion = undefined;
@@ -1842,10 +1843,22 @@ export class AgentSession {
 		this.#sessionBeforeSwitchReconciler = reconciler ?? undefined;
 	}
 
-	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
+	#sessionSwitchReconciler: ((phase: "before" | "after") => Promise<void>) | undefined;
 
-	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
+	setSessionSwitchReconciler(reconciler: ((phase: "before" | "after") => Promise<void>) | null): void {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
+	}
+
+	async #reconcileSessionSwitch(phase: "before" | "after", reason: string): Promise<void> {
+		try {
+			await this.#sessionSwitchReconciler?.(phase);
+		} catch (error) {
+			logger.warn("Failed to reconcile collaboration around session replacement", {
+				phase,
+				reason,
+				error: String(error),
+			});
+		}
 	}
 
 	/** Provider-scoped mutable state store for transport/session caches. */
@@ -7189,6 +7202,7 @@ export class AgentSession {
 			}
 		}
 
+		await this.#reconcileSessionSwitch("before", "new");
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
 		await this.abort();
@@ -7223,6 +7237,7 @@ export class AgentSession {
 				sessionTransitioned = true;
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
+				if (!sessionTransitioned) await this.#reconcileSessionSwitch("after", "new rollback");
 			}
 
 			this.#clearSessionScopedToolState();
@@ -7256,6 +7271,7 @@ export class AgentSession {
 			// turn goes out.
 			resetCapabilities();
 			await this.refreshBaseSystemPrompt();
+			await this.#reconcileSessionSwitch("after", "new");
 
 			// Emit session_switch event with reason "new" to hooks
 			if (this.#extensionRunner) {
@@ -7306,6 +7322,7 @@ export class AgentSession {
 			}
 		}
 
+		await this.#reconcileSessionSwitch("before", "fork");
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
 		await this.sessionManager.flush();
@@ -7323,10 +7340,12 @@ export class AgentSession {
 				forkResult = await this.sessionManager.fork();
 			} catch (error) {
 				this.#bash.finishSessionTransition(bashTransition, false);
+				await this.#reconcileSessionSwitch("after", "fork rollback");
 				throw error;
 			}
 			if (!forkResult) {
 				this.#bash.finishSessionTransition(bashTransition, false);
+				await this.#reconcileSessionSwitch("after", "fork rollback");
 				return false;
 			}
 			this.#bash.markSessionTransition(bashTransition);
@@ -7345,6 +7364,7 @@ export class AgentSession {
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
 			await this.#memory.resetContextForNewTranscript();
+			await this.#reconcileSessionSwitch("after", "fork");
 
 			// Emit session_switch event with reason "fork" to hooks
 			if (this.#extensionRunner) {
@@ -7359,6 +7379,7 @@ export class AgentSession {
 		} finally {
 			if (advisorRecordersDetached) this.#advisors.reattachRecorderFeeds();
 		}
+
 	}
 
 	/** Move the active session and artifacts after enforcing mode transition invariants. */
@@ -8281,6 +8302,7 @@ export class AgentSession {
 			}
 		}
 
+		await this.#reconcileSessionSwitch("before", "resume");
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
 		await this.#sessionBeforeSwitchReconciler?.();
@@ -8480,14 +8502,7 @@ export class AgentSession {
 				this.#clearSessionScopedToolState();
 			}
 			this.#reconnectToAgent();
-			try {
-				await this.#sessionSwitchReconciler?.();
-			} catch (error) {
-				logger.warn("Failed to reconcile session mode after switch", {
-					targetSessionFile: sessionPath,
-					error: String(error),
-				});
-			}
+			await this.#reconcileSessionSwitch("after", "resume");
 			// Refresh the workspace-roots block to match the resumed session's directory set.
 			// Wrapped so a rebuild failure (e.g. a gate that intentionally fails in tests)
 			// doesn't roll back an otherwise-successful session switch.
@@ -8560,14 +8575,7 @@ export class AgentSession {
 			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
 			this.#reconnectToAgent();
-			try {
-				await this.#sessionSwitchReconciler?.();
-			} catch (reconcileError) {
-				logger.warn("Failed to reconcile session mode after switch rollback", {
-					targetSessionFile: sessionPath,
-					error: String(reconcileError),
-				});
-			}
+			await this.#reconcileSessionSwitch("after", "resume rollback");
 			if (cwdChangeTarget && error !== SESSION_CWD_CHANGE_REJECTED && options?.onCwdChange) {
 				let rollbackFailure: string | undefined;
 				try {
@@ -8631,6 +8639,7 @@ export class AgentSession {
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
 
+		await this.#reconcileSessionSwitch("before", "branch");
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -8664,6 +8673,7 @@ export class AgentSession {
 				sessionTransitioned = true;
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
+				if (!sessionTransitioned) await this.#reconcileSessionSwitch("after", "branch rollback");
 			}
 			this.#clearSessionScopedToolState();
 			this.#rehydrateCheckpointRewindState();
@@ -8690,6 +8700,7 @@ export class AgentSession {
 				this.#advisors.resetSessionState();
 				this.#closeCodexProviderSessionsForHistoryRewrite();
 			}
+			await this.#reconcileSessionSwitch("after", "branch");
 
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
@@ -8760,6 +8771,7 @@ export class AgentSession {
 			throw new Error("Cannot branch /btw while session maintenance or user work is still running");
 		}
 
+		await this.#reconcileSessionSwitch("before", "btw branch");
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.agent.replaceQueues([], []);
@@ -8787,6 +8799,7 @@ export class AgentSession {
 				sessionTransitioned = true;
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
+				if (!sessionTransitioned) await this.#reconcileSessionSwitch("after", "btw branch rollback");
 			}
 
 			this.#clearSessionScopedToolState();
@@ -8816,6 +8829,7 @@ export class AgentSession {
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#advisors.resetSessionState();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
+			await this.#reconcileSessionSwitch("after", "btw branch");
 			advisorRecordersDetached = false;
 
 			return { cancelled: false, sessionFile: this.sessionFile };
@@ -8825,6 +8839,7 @@ export class AgentSession {
 				else this.#advisors.reattachRecorderFeeds();
 			}
 		}
+
 	}
 
 	// =========================================================================
@@ -9094,6 +9109,7 @@ export class AgentSession {
 			newLeafId = targetId;
 		}
 
+		await this.#reconcileSessionSwitch("before", "tree navigation");
 		// Switch leaf (with or without summary)
 		// Summary is attached at the navigation target position (newLeafId), not the old branch
 		const bashTransition = this.#bash.beginSessionTransition();
@@ -9118,6 +9134,7 @@ export class AgentSession {
 			branchTransitioned = true;
 		} finally {
 			this.#bash.finishSessionTransition(bashTransition, branchTransitioned);
+			if (!branchTransitioned) await this.#reconcileSessionSwitch("after", "tree navigation rollback");
 		}
 
 		// Update agent state — build display context to populate agent messages.
@@ -9128,6 +9145,7 @@ export class AgentSession {
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
+		await this.#reconcileSessionSwitch("after", "tree navigation");
 
 		this.#branchSummaryAbortController = undefined;
 

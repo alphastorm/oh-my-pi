@@ -55,4 +55,18 @@ describe("SessionManager branch ordering", () => {
 		manager.appendModelChange("anthropic/claude-haiku-4-5", "smol");
 		expect(manager.getLastModelChangeRole()).toBe("smol");
 	});
+
+	it("notifies model-change subscribers after each applied model entry", () => {
+		const manager = SessionManager.inMemory();
+		const models: string[] = [];
+		const unsubscribe = manager.onModelChanged(model => models.push(model));
+
+		manager.appendModelChange("anthropic/claude-sonnet-4-5", "default");
+		manager.appendModelChange("openai/gpt-5.4", "slow");
+		expect(models).toEqual(["anthropic/claude-sonnet-4-5", "openai/gpt-5.4"]);
+
+		unsubscribe();
+		manager.appendModelChange("google/gemini-3-pro", "default");
+		expect(models).toEqual(["anthropic/claude-sonnet-4-5", "openai/gpt-5.4"]);
+	});
 });

@@ -127,7 +127,6 @@ function makeStreamingHostContext(): StreamingHostHarness {
 		ui: { requestRender: () => {} },
 		updatePendingMessagesDisplay: () => {},
 		showStatus: () => {},
-		collabHost: undefined,
 	} as unknown as InteractiveModeContext;
 	const nextPrompt = (): Promise<CapturedPrompt> => {
 		const { promise, resolve } = Promise.withResolvers<CapturedPrompt>();

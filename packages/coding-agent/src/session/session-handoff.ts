@@ -46,6 +46,7 @@ export interface SessionHandoffHost {
 	thinkingLevel(): ThinkingLevel | undefined;
 	sessionId(): string;
 	baseSystemPrompt(): string[];
+
 	setSkipPostTurnMaintenance(timestamp: number | undefined): void;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
 	deobfuscateFromProvider(text: string): string;

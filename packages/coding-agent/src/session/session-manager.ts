@@ -554,6 +554,7 @@ export class SessionManager {
 	#breadcrumbFresh = false;
 	#sessionNameChangedCallbacks = new Set<() => void>();
 	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
+	#modelChangedCallbacks = new Set<(model: string) => void>();
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#cwd = cwd;
@@ -1264,6 +1265,16 @@ export class SessionManager {
 				callback();
 			} catch (err) {
 				logger.warn("SessionManager: session name change hook failed", { error: String(err) });
+			}
+		}
+	}
+
+	#notifyModelChangedListeners(model: string): void {
+		for (const callback of [...this.#modelChangedCallbacks]) {
+			try {
+				callback(model);
+			} catch (err) {
+				logger.warn("SessionManager: model change hook failed", { error: String(err) });
 			}
 		}
 	}
@@ -2191,6 +2202,13 @@ export class SessionManager {
 		};
 	}
 
+	onModelChanged(cb: (model: string) => void): () => void {
+		this.#modelChangedCallbacks.add(cb);
+		return () => {
+			this.#modelChangedCallbacks.delete(cb);
+		};
+	}
+
 	/**
 	 * Set the session display name.
 	 * @param source "user" for explicit renames; "auto" for generated titles.
@@ -2337,6 +2355,7 @@ export class SessionManager {
 			resolvedModelIsFallback,
 		};
 		this.#recordEntry(entry);
+		this.#notifyModelChangedListeners(model);
 		return entry.id;
 	}
 

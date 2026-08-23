@@ -33,9 +33,9 @@ import {
 	consumeExactCheckpoint,
 	DEFAULT_EXACT_CHECKPOINT_TTL_MS,
 	type ExactCheckpointAuthority,
+	ExactCheckpointError,
 	type ExactCheckpointReceipt,
 	type ExactCheckpointResumeMode,
-	ExactCheckpointError,
 	MAX_EXACT_CHECKPOINT_TTL_MS,
 	persistExactCheckpoint,
 	reserveExactCheckpointClaim,
@@ -145,6 +145,7 @@ export interface ResumedExactCheckpoint {
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
 const DISCARDED_ENTRY_BRANCH_MARKER = "discarded-entry-branch";
+const RUNTIME_VARIANT = process.env.OMP_RUNTIME_VARIANT === "code-mode" ? "code-mode" : "main";
 
 function mintSessionId(): string {
 	return Bun.randomUUIDv7();
@@ -2828,7 +2829,12 @@ export class SessionManager {
 			| PythonExecutionMessage
 			| FileMentionMessage,
 	): string {
-		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
+		const entry: SessionMessageEntry = {
+			type: "message",
+			...this.#freshEntryFields(),
+			message,
+			...(message.role === "assistant" ? { runtimeVariant: RUNTIME_VARIANT } : {}),
+		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}
@@ -2855,6 +2861,7 @@ export class SessionManager {
 			parentId,
 			timestamp: nowIso(),
 			message,
+			...(message.role === "assistant" ? { runtimeVariant: RUNTIME_VARIANT } : {}),
 		};
 		this.#recordEntry(entry);
 		this.#index.setLeaf(activeLeafId);

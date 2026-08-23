@@ -224,6 +224,7 @@ function extractStats(
 	sessionFile: string,
 	folder: string,
 	entry: SessionMessageEntry,
+	sessionId: string | null,
 	currentServiceTier: ServiceTierByFamily | undefined,
 	agentType: AgentType,
 ): MessageStatsInput | null {
@@ -274,6 +275,7 @@ function extractStats(
 
 	return {
 		sessionFile,
+		sessionId,
 		entryId: entry.id,
 		folder,
 		model: msg.model,
@@ -282,6 +284,27 @@ function extractStats(
 		timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 		duration: msg.duration ?? null,
 		ttft: msg.ttft ?? null,
+		queueMs: typeof msg.queueMs === "number" && Number.isFinite(msg.queueMs) ? msg.queueMs : null,
+		estimatedContextTokens:
+			typeof msg.estimatedContextTokens === "number" && Number.isFinite(msg.estimatedContextTokens)
+				? msg.estimatedContextTokens
+				: null,
+		runtimeVariant:
+			entry.runtimeVariant === "main" || entry.runtimeVariant === "code-mode" ? entry.runtimeVariant : null,
+		logicalTurnId: typeof msg.logicalTurnId === "string" && msg.logicalTurnId.trim() ? msg.logicalTurnId : null,
+		runtimeRequestId:
+			typeof msg.runtimeRequestId === "string" && msg.runtimeRequestId.trim() ? msg.runtimeRequestId : null,
+		parentRuntimeRequestId:
+			typeof msg.parentRuntimeRequestId === "string" && msg.parentRuntimeRequestId.trim()
+				? msg.parentRuntimeRequestId
+				: null,
+		attemptId: typeof msg.attemptId === "string" && msg.attemptId.trim() ? msg.attemptId : null,
+		inputTokenEstimator:
+			typeof msg.inputTokenEstimator === "string" && msg.inputTokenEstimator.trim() ? msg.inputTokenEstimator : null,
+		providerRequestClass:
+			typeof msg.providerRequestClass === "string" && msg.providerRequestClass.trim()
+				? msg.providerRequestClass
+				: null,
 		// A message persisted without a terminal stop reason never completed
 		// normally: classify by whether it carried an error.
 		stopReason: msg.stopReason ?? (msg.errorMessage ? "error" : "aborted"),
@@ -295,6 +318,8 @@ function extractModelUsageStats(
 	sessionFile: string,
 	folder: string,
 	entry: SessionModelUsageEntry,
+	sessionId: string | null,
+	currentServiceTier: ServiceTierByFamily | undefined,
 	agentType: AgentType,
 ): MessageStatsInput | null {
 	const timestamp = Date.parse(entry.timestamp);
@@ -318,7 +343,8 @@ function extractModelUsageStats(
 				timestamp: Number.isFinite(timestamp) ? timestamp : 0,
 			},
 		},
-		undefined,
+		sessionId,
+		currentServiceTier,
 		agentType,
 	);
 }
@@ -440,6 +466,26 @@ function parseJsonLine(bytes: Uint8Array, start: number, end: number): SessionEn
 	} catch {
 		return null;
 	}
+}
+
+function parseSessionId(bytes: Uint8Array): string | null {
+	let cursor = 0;
+	for (
+		let remainingPreambleEntries = 16;
+		cursor < bytes.length && remainingPreambleEntries > 0;
+		remainingPreambleEntries--
+	) {
+		const newline = bytes.indexOf(LF, cursor);
+		const hasNewline = newline !== -1;
+		const lineEnd = hasNewline ? newline : bytes.length;
+		const entry = parseJsonLine(bytes, cursor, lineEnd);
+		if (entry?.type === "session" && "id" in entry) {
+			return typeof entry.id === "string" && entry.id.trim() ? entry.id : null;
+		}
+		if (entry?.type === "message") return null;
+		cursor = hasNewline ? newline + 1 : bytes.length;
+	}
+	return null;
 }
 
 function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEntry) => void): number {
@@ -583,6 +629,7 @@ export async function parseSessionFile(
 
 	const folder = extractFolderFromPath(sessionPath);
 	const agentType = classifyAgentType(sessionPath);
+	const sessionId = parseSessionId(bytes);
 	const stats: MessageStatsInput[] = [];
 	const userStats: UserMessageStats[] = [];
 	const userLinks: UserMessageLink[] = [];
@@ -608,12 +655,19 @@ export async function parseSessionFile(
 			continue;
 		}
 		if (isModelUsage(entry)) {
-			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
+			const modelUsageStats = extractModelUsageStats(
+				sessionPath,
+				folder,
+				entry,
+				sessionId,
+				currentServiceTier,
+				agentType,
+			);
 			if (modelUsageStats) stats.push(modelUsageStats);
 			continue;
 		}
 		if (isAssistantMessage(entry)) {
-			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
+			const msgStats = extractStats(sessionPath, folder, entry, sessionId, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
 			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
 			// Link assistant's responding model back to the user message it answered.

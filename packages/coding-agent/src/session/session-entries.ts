@@ -86,9 +86,13 @@ export interface SessionEntryBase {
 	timestamp: string;
 }
 
+export type RuntimeVariant = "main" | "code-mode";
+
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Runtime that originally wrote this assistant entry; absent is historical/unknown. */
+	runtimeVariant?: RuntimeVariant;
 }
 
 /** Usage from a model call that does not belong in the conversation transcript. */

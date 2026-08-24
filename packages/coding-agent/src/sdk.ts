@@ -3172,11 +3172,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed) and refreshed on every later rebuild via
 		// `setAdvisorMemoryPrompt`.
 		let advisorMemoryPrompt: string | undefined;
+		// Fresh sessions must still rebuild as deferred MCP tools connect. Sessions
+		// that started with prompt metadata (including legacy/model-mismatch state)
+		// freeze the current branch after its first compatible rebuild.
+		const restorePersistedPromptOnRebuild = sessionManager.getPersistedSystemPromptState() !== undefined;
+		const restorePersistedSystemPrompt = (): BuildSystemPromptResult | undefined => {
+			if (!restorePersistedPromptOnRebuild) return undefined;
+			const persistedSystemPrompt = sessionManager.getPersistedSystemPromptState();
+			if (!persistedSystemPrompt) return undefined;
+			if (persistedSystemPrompt.model !== getActiveModelString()) return undefined;
+			return {
+				systemPrompt: [...persistedSystemPrompt.parts],
+				xdevCatalogNames: [...persistedSystemPrompt.xdevCatalogNames],
+			};
+		};
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
 			rebuildOptions?: { directToolNames?: readonly string[] },
 		): Promise<BuildSystemPromptResult> => {
+			const restored = restorePersistedSystemPrompt();
+			if (restored) return restored;
 			const promptCwd = sessionManager.getCwd();
 			const activeRepoContext = hasSession
 				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)
@@ -3342,16 +3358,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				activeRepoContext,
 			});
 
+			let result: BuildSystemPromptResult;
 			if (options.systemPrompt === undefined) {
-				return defaultPrompt;
+				result = defaultPrompt;
+			} else {
+				const customPrompt =
+					typeof options.systemPrompt === "function"
+						? options.systemPrompt(defaultPrompt.systemPrompt)
+						: options.systemPrompt;
+				result = {
+					systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				};
 			}
-			const customPrompt =
-				typeof options.systemPrompt === "function"
-					? options.systemPrompt(defaultPrompt.systemPrompt)
-					: options.systemPrompt;
-			return {
-				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
-			};
+			sessionManager.setPersistedSystemPrompt(result.systemPrompt, result.xdevCatalogNames, getActiveModelString());
+			return result;
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
@@ -3497,12 +3517,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		setSessionActiveToolNames(initialToolNames);
-		const { systemPrompt } = await logger.time(
-			"buildSystemPrompt",
-			rebuildSystemPrompt,
-			initialToolNames,
-			toolRegistry,
-		);
+		const initialSystemPrompt =
+			restorePersistedSystemPrompt() ??
+			(await logger.time("buildSystemPrompt", rebuildSystemPrompt, initialToolNames, toolRegistry));
+		const systemPrompt = initialSystemPrompt.systemPrompt;
 
 		const promptTemplates = await promptTemplatesPromise;
 		toolSession.promptTemplates = promptTemplates;
@@ -3932,6 +3950,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorStreamFn: settingsAwareStreamFn,
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
+			basePromptXdevNames: initialSystemPrompt.xdevCatalogNames,
 			rebuildSystemPrompt,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,

@@ -157,6 +157,45 @@ describe("exact_checkpoint_v1", () => {
 		});
 	});
 
+	it("exports Anthropic-compacted history without native state and resumes its kept tail", async () => {
+		const cwd = makeTempDir("omp-exact-anthropic-");
+		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		manager.appendMessage({ role: "user", content: "old question", timestamp: 1_000 });
+		const kept = manager.appendMessage(assistantMessage("kept answer", 2_000));
+		manager.appendCompaction("native summary", "summary", kept, 12_345, {
+			preserveData: {
+				anthropicCompaction: {
+					provider: "anthropic",
+					content: "native summary",
+					encryptedContent: "opaque-native-state",
+					model: "claude-sonnet-4-5",
+				},
+			},
+		});
+		const ordinary = manager.buildSessionContext().messages[0];
+		if (ordinary?.role !== "compactionSummary") throw new Error("Expected native summary");
+		expect(ordinary.providerPayload).toMatchObject({
+			type: "anthropicCompaction",
+			encryptedContent: "opaque-native-state",
+		});
+		const checkpointPath = path.join(cwd, "checkpoint.json");
+		const receipt = await manager.createExactCheckpoint({
+			authority: authority(cwd),
+			checkpointPath,
+			boundary: { streaming: false, committed: true },
+		});
+		const envelope = await loadExactCheckpoint(checkpointPath, authority(cwd));
+		expect(JSON.stringify(envelope.messages)).not.toContain("opaque-native-state");
+		expect(JSON.stringify(envelope.messages)).not.toContain("providerPayload");
+		expect(envelope.messages.map(message => message.role)).toEqual(["compactionSummary", "assistant"]);
+		const resumed = await SessionManager.resumeExactCheckpoint(checkpointPath, authority(cwd), {
+			expectedIntegritySha256: receipt.integritySha256,
+			sessionDir: path.join(cwd, "successors"),
+			claimRoot: path.join(cwd, "claims"),
+		});
+		expect(resumed.sessionManager.buildSessionContext().messages).toEqual(envelope.messages);
+	});
+
 	it("fails closed for every authoritative identity mismatch before consumption", async () => {
 		const cwd = makeTempDir("omp-exact-mismatch-");
 		const otherCwd = makeTempDir("omp-exact-mismatch-other-");

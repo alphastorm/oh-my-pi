@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -39,6 +39,58 @@ describe("parseBlobRef validation", () => {
 		"", // empty
 	])("rejects malformed suffix %p", suffix => {
 		expect(parseBlobRef(`blob:sha256:${suffix}`)).toBeNull();
+	});
+});
+
+describe("blob publication", () => {
+	it("publishes once and reuses only matching content", async () => {
+		const data = Buffer.from("atomic-content-addressed-blob");
+		const first = store.putSync(data);
+		const second = await store.put(data);
+
+		expect(second.path).toBe(first.path);
+		expect(fs.readFileSync(first.path)).toEqual(data);
+		expect(fs.readdirSync(blobDir).filter(name => name.endsWith(".tmp"))).toEqual([]);
+	});
+
+	it("atomically repairs corrupt content left by the predecessor writer", async () => {
+		const data = Buffer.from("expected-content-addressed-blob");
+		const hash = new Bun.SHA256().update(data).digest("hex");
+		const blobPath = path.join(blobDir, hash);
+		fs.writeFileSync(blobPath, "corrupt");
+
+		const repaired = store.putSync(data);
+		expect(repaired.path).toBe(blobPath);
+		expect(fs.readFileSync(blobPath)).toEqual(data);
+		await expect(store.put(data)).resolves.toMatchObject({ path: blobPath });
+		expect(fs.readdirSync(blobDir).filter(name => name.endsWith(".tmp"))).toEqual([]);
+	});
+
+	it("copies async caller bytes before yielding", async () => {
+		const original = Buffer.from("caller-owned-stable-bytes");
+		const expected = Buffer.from(original);
+		const pending = store.put(original);
+		original.fill(0x78);
+
+		const published = await pending;
+		expect(fs.readFileSync(published.path)).toEqual(expected);
+		expect(published.hash).toBe(new Bun.SHA256().update(expected).digest("hex"));
+	});
+
+	it("propagates a real directory fsync failure", () => {
+		const realFsync = fs.fsyncSync;
+		let calls = 0;
+		const fsync = spyOn(fs, "fsyncSync").mockImplementation(fd => {
+			calls++;
+			if (calls === 2) throw Object.assign(new Error("directory sync failed"), { code: "EIO" });
+			return realFsync(fd);
+		});
+		try {
+			expect(() => store.putSync(Buffer.from("directory-sync-contract"))).toThrow("directory sync failed");
+			expect(calls).toBe(2);
+		} finally {
+			fsync.mockRestore();
+		}
 	});
 });
 

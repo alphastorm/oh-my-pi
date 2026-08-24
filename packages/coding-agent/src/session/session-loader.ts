@@ -2,11 +2,24 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { ConcatSink, getBlobsDir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { Semaphore } from "../task/parallel";
-import { BlobStore, isBlobRef, lazyImageDataSync, resolveImageData, resolveImageDataUrl } from "./blob-store";
+import {
+	BlobStore,
+	isBlobRef,
+	lazyImageDataSync,
+	resolveImageData,
+	resolveImageDataUrl,
+	resolveTextData,
+} from "./blob-store";
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
-import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
+import {
+	isExternalizableImagePosition,
+	isImageDataPayload,
+	isPersistedTextBlob,
+	isPersistenceTruncatedString,
+	isProviderAuthenticatedBlock,
+} from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 import {
 	parseTitleSlotFromContent,
@@ -417,60 +430,152 @@ export async function visitEntriesFromFile(
  * provider image URLs for downstream transports. Snapcompact frames stay as
  * references until context rebuilding selects them.
  */
-function hasImageUrl(value: unknown): value is { image_url: string } {
-	return typeof value === "object" && value !== null && "image_url" in value && typeof value.image_url === "string";
-}
-
 type BlobReferenceResolver = (data: string, asDataUrl?: boolean) => Promise<string>;
 
-async function resolvePersistedBlobRefs(value: unknown, resolve: BlobReferenceResolver, key?: string): Promise<void> {
-	if (key !== "frames" && isExternalizableImagePosition(value, key) && isBlobRef(value.data)) {
-		value.data = await resolve(value.data);
-		return;
-	}
+function shouldResolveImagePayload(value: unknown, key?: string): value is { data: string; mimeType?: string } {
+	return key !== "frames" && isExternalizableImagePosition(value, key) && isBlobRef(value.data);
+}
 
+function invalidTextBlobMetadata(detail: string): Error {
+	return new Error(`Invalid persisted text blob metadata: ${detail}`);
+}
+
+type TextBlobTarget = { container: unknown[] | Record<string, unknown>; key: string | number };
+
+function locateTextBlobTarget(entry: FileEntry, path: unknown): TextBlobTarget {
+	if (!Array.isArray(path) || path.length === 0) throw invalidTextBlobMetadata("path must be non-empty");
+	let current: unknown = entry;
+	for (let i = 0; i < path.length; i++) {
+		if (isProviderAuthenticatedBlock(current, typeof path[i - 1] === "string" ? path[i - 1] : undefined)) {
+			throw invalidTextBlobMetadata("path enters a provider-authenticated block");
+		}
+		const segment = path[i];
+		const isLast = i === path.length - 1;
+		if (Array.isArray(current)) {
+			if (!Number.isSafeInteger(segment) || (segment as number) < 0 || !Object.hasOwn(current, segment as number)) {
+				throw invalidTextBlobMetadata("array path segment does not exist");
+			}
+			if (isLast) {
+				if (current[segment as number] !== null)
+					throw invalidTextBlobMetadata("path must target a null placeholder");
+				return { container: current, key: segment as number };
+			}
+			current = current[segment as number];
+			continue;
+		}
+		if (typeof current !== "object" || current === null || typeof segment !== "string") {
+			throw invalidTextBlobMetadata("object path segment is invalid");
+		}
+		const record = current as Record<string, unknown>;
+		if (!Object.hasOwn(record, segment)) throw invalidTextBlobMetadata("object path segment does not exist");
+		if (isLast) {
+			if (record[segment] !== null) throw invalidTextBlobMetadata("path must target a null placeholder");
+			return { container: record, key: segment };
+		}
+		current = record[segment];
+	}
+	throw invalidTextBlobMetadata("path is empty");
+}
+
+async function resolveEntryTextBlobs(entry: FileEntry, blobStore: BlobStore): Promise<void> {
+	const metadata = (entry as FileEntry & { persistedTextBlobs?: unknown }).persistedTextBlobs;
+	if (!Array.isArray(metadata) || metadata.length === 0) throw invalidTextBlobMetadata("expected a non-empty array");
+
+	const seenPaths = new Set<string>();
+	const validated = metadata.map(location => {
+		if (
+			typeof location !== "object" ||
+			location === null ||
+			Object.keys(location).length !== 2 ||
+			!("path" in location) ||
+			!("blob" in location) ||
+			!isPersistedTextBlob(location.blob)
+		) {
+			throw invalidTextBlobMetadata("location shape is invalid");
+		}
+		const pathKey = JSON.stringify(location.path);
+		if (seenPaths.has(pathKey)) throw invalidTextBlobMetadata("duplicate path");
+		seenPaths.add(pathKey);
+		return {
+			target: locateTextBlobTarget(entry, location.path),
+			blob: location.blob,
+		};
+	});
+
+	const texts = await Promise.all(validated.map(({ blob }) => resolveTextData(blobStore, blob.ref, blob.chars)));
+	for (let i = 0; i < validated.length; i++) {
+		const { container, key } = validated[i]!.target;
+		const text = texts[i]!;
+		if (Array.isArray(container)) {
+			container[key as number] = text;
+		} else {
+			Object.defineProperty(container, key, {
+				value: text,
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+		}
+	}
+	delete (entry as FileEntry & { persistedTextBlobs?: unknown }).persistedTextBlobs;
+}
+
+async function resolvePersistedBlobRefs(value: unknown, resolve: BlobReferenceResolver, key?: string): Promise<unknown> {
+	if (isProviderAuthenticatedBlock(value, key)) return value;
+	if (shouldResolveImagePayload(value, key)) {
+		if (typeof value === "string") return await resolve(value);
+		if (Array.isArray(value)) {
+			return await Promise.all(value.map(async item => (typeof item === "string" ? await resolve(item) : item)));
+		}
+		if (isImageDataPayload(value)) {
+			return { ...value, data: await resolve(value.data) };
+		}
+	}
+	if (typeof value === "string") {
+		if (key === "image_url" && isBlobRef(value)) {
+			return await resolve(value, true);
+		}
+		return value;
+	}
 	if (Array.isArray(value)) {
-		await Promise.all(value.map(item => resolvePersistedBlobRefs(item, resolve, key)));
-		return;
+		return await Promise.all(value.map(async item => await resolvePersistedBlobRefs(item, resolve, key)));
 	}
-
-	if (typeof value !== "object" || value === null) return;
 	if (
+		typeof value === "object" &&
+		value !== null &&
 		"type" in value &&
 		value.type === "image_generation_call" &&
 		"result" in value &&
 		typeof value.result === "string" &&
 		isBlobRef(value.result)
 	) {
-		value.result = await resolve(value.result);
+		return { ...value, result: await resolve(value.result) };
 	}
-
-	if (hasImageUrl(value) && isBlobRef(value.image_url)) {
-		value.image_url = await resolve(value.image_url, true);
+	if (typeof value === "object" && value !== null) {
+		const entries = await Promise.all(
+			Object.entries(value).map(async ([childKey, child]) => [
+				childKey,
+				await resolvePersistedBlobRefs(child, resolve, childKey),
+			]),
+		);
+		return Object.fromEntries(entries);
 	}
-
-	await Promise.all(
-		Object.entries(value).map(([childKey, item]) => resolvePersistedBlobRefs(item, resolve, childKey)),
-	);
+	return value;
 }
 
-/**
- * Cheap synchronous precheck: does this value's tree contain any `blob:sha256:` string?
- * Early-exits on the first hit and allocates no promises, so blob-free entries skip the
- * async {@link resolvePersistedBlobRefs} descent entirely. Conservative — a blob ref in a
- * non-resolved position still returns true, which only costs an extra (no-op) walk.
- */
-function containsBlobRef(value: unknown): boolean {
+function containsBlobRef(value: unknown, key?: string): boolean {
+	if (isProviderAuthenticatedBlock(value, key)) return false;
 	if (typeof value === "string") return isBlobRef(value);
 	if (Array.isArray(value)) {
 		for (const item of value) {
-			if (containsBlobRef(item)) return true;
+			if (containsBlobRef(item, key)) return true;
 		}
 		return false;
 	}
-	if (typeof value !== "object" || value === null) return false;
-	for (const key in value) {
-		if (containsBlobRef((value as Record<string, unknown>)[key])) return true;
+	if (typeof value === "object" && value !== null) {
+		for (const [childKey, child] of Object.entries(value)) {
+			if (containsBlobRef(child, childKey)) return true;
+		}
 	}
 	return false;
 }
@@ -509,7 +614,12 @@ async function resolveBlobRefs(values: readonly unknown[], blobStore: BlobStore)
 	const pending: Promise<void>[] = [];
 	for (const value of values) {
 		if (!containsBlobRef(value)) continue;
-		pending.push(resolvePersistedBlobRefs(value, resolve));
+		pending.push(
+			(async () => {
+				const resolved = await resolvePersistedBlobRefs(value, resolve);
+				if (typeof resolved === "object" && resolved !== null) Object.assign(value as object, resolved);
+			})(),
+		);
 	}
 	await Promise.all(pending);
 }
@@ -517,6 +627,13 @@ async function resolveBlobRefs(values: readonly unknown[], blobStore: BlobStore)
 export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: BlobStore): Promise<void> {
 	const sessionEntries = entries.filter(entry => entry.type !== "session");
 	for (const entry of sessionEntries) repairTruncatedSnapcompactFrames(entry);
+	// Text blobs restore null placeholders before the reference walk, so a
+	// restored payload is visible to it in the same load.
+	await Promise.all(
+		sessionEntries
+			.filter(entry => Object.hasOwn(entry, "persistedTextBlobs"))
+			.map(entry => resolveEntryTextBlobs(entry, blobStore)),
+	);
 	await resolveBlobRefs(sessionEntries, blobStore);
 }
 

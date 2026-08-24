@@ -112,6 +112,10 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		 * path. Existing tests leave this off, so their rebuild carries no catalog.
 		 */
 		exposeXdevCatalog?: boolean;
+		/** xd:// names already rendered into the initial base prompt. */
+		basePromptXdevNames?: readonly string[];
+		/** Model a restored prompt that does not need a dynamic rebuild callback. */
+		disablePromptRebuild?: boolean;
 		/** Optional per-turn system prompt replacement returned by before_agent_start. */
 		beforeAgentStartSystemPrompt?: string[];
 	}
@@ -194,12 +198,18 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 						emit: async () => undefined,
 					} as unknown as ExtensionRunner)
 				: undefined,
-			rebuildSystemPrompt: async (toolNames, _tools) => {
-				const base = await rebuildSystemPrompt(toolNames);
-				if (!options.exposeXdevCatalog) return { systemPrompt: [base] };
-				const catalog = options.xdev ? [...options.xdev.mountedNames] : [];
-				return { systemPrompt: [`${base}\nxd:// catalog: ${catalog.join(",")}`], xdevCatalogNames: catalog };
-			},
+			basePromptXdevNames: options.basePromptXdevNames,
+			rebuildSystemPrompt: options.disablePromptRebuild
+				? undefined
+				: async (toolNames, _tools) => {
+						const base = await rebuildSystemPrompt(toolNames);
+						if (!options.exposeXdevCatalog) return { systemPrompt: [base] };
+						const catalog = options.xdev ? [...options.xdev.mountedNames] : [];
+						return {
+							systemPrompt: [`${base}\nxd:// catalog: ${catalog.join(",")}`],
+							xdevCatalogNames: catalog,
+						};
+					},
 			getMcpServerInstructions: options.getMcpServerInstructions,
 			xdev: options.xdev,
 		});
@@ -1205,6 +1215,23 @@ These tools became available:
 			session.agent.state.messages.filter(m => m.role === "custom" && m.customType === "xdev-mount-notice"),
 		).toHaveLength(0);
 	});
+	it("does not re-list restored base catalog devices after reconnect", async () => {
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		const { session, contexts } = newSession(async () => "unused", {
+			xdev: createTestXdevState(),
+			responses: [{ content: ["ok"] }],
+			basePromptXdevNames: [search.name],
+			disablePromptRebuild: true,
+		});
+
+		await session.refreshMCPTools([search]);
+		await session.prompt("hi");
+
+		expect(
+			session.agent.state.messages.filter(m => m.role === "custom" && m.customType === "xdev-mount-notice"),
+		).toHaveLength(0);
+		expect(mountNoticesIn(contexts[0])).toHaveLength(0);
+	});
 
 	it("announces an unmount after a maintenance rebuild delivered the pending addition", async () => {
 		const { session, contexts, systemPrompts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
@@ -1239,7 +1266,6 @@ These tools became available:
 		expect(notices[0]).toContain("Unmounted; writes fail:");
 		expect(notices[0]).toContain("xd://mcp__nucleus_search");
 	});
-
 	it("keeps the mount notice when before_agent_start replaces the catalog prompt (#7139)", async () => {
 		const replacementPrompt = ["extension replacement"];
 		const { session, contexts, systemPrompts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {

@@ -1,8 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+
 import type { AssistantMessage, ProviderPayload, Usage } from "@oh-my-pi/pi-ai";
 import { BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
-import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { prepareEntryForPersistence } from "@oh-my-pi/pi-coding-agent/session/session-persistence";
+import type { FileEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { resolveBlobRefsInEntries } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { isPersistedTextBlob, prepareEntryForPersistence } from "@oh-my-pi/pi-coding-agent/session/session-persistence";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const usage = (): Usage => ({
@@ -129,30 +133,253 @@ describe("session atomic reasoning persistence", () => {
 		expect(redactedThinking.data.endsWith(truncationNotice)).toBe(false);
 	});
 
-	it("still truncates oversized UNSIGNED thinking and text blocks", () => {
+	it("externalizes and restores oversized unsigned thinking and text blocks", async () => {
 		using tempDir = TempDir.createSync("@pi-session-atomic-unsigned-");
 		const blobStore = new BlobStore(tempDir.path());
-
-		const message = persistedAssistant(
-			assistantEntry(
-				[
-					{ type: "thinking", thinking: "y".repeat(600_000) },
-					{ type: "text", text: "z".repeat(600_000) },
-				],
-				undefined,
-			),
-			blobStore,
+		const thinkingText = "y".repeat(600_000);
+		const responseText = "z".repeat(600_000);
+		const entry = assistantEntry(
+			[
+				{ type: "thinking", thinking: thinkingText },
+				{ type: "text", text: responseText },
+			],
+			undefined,
 		);
 
-		const thinking = message.content[0];
-		if (thinking?.type !== "thinking") throw new Error("Expected thinking block");
-		expect(thinking.thinking.length).toBeLessThan(600_000);
-		expect(thinking.thinking.endsWith(truncationNotice)).toBe(true);
+		const persisted = prepareEntryForPersistence(entry, blobStore);
+		if (persisted.type !== "message" || persisted.message.role !== "assistant") {
+			throw new Error("Expected persisted assistant message");
+		}
+		const persistedThinking = persisted.message.content[0];
+		const persistedText = persisted.message.content[1];
+		if (persistedThinking?.type !== "thinking" || persistedText?.type !== "text") {
+			throw new Error("Expected persisted thinking and text blocks");
+		}
+		expect(persistedThinking.thinking).toBeNull();
+		expect(persistedText.text).toBeNull();
+		expect(persisted.persistedTextBlobs?.map(location => location.path)).toEqual([
+			["message", "content", 0, "thinking"],
+			["message", "content", 1, "text"],
+		]);
+		expect(persisted.persistedTextBlobs?.every(location => isPersistedTextBlob(location.blob))).toBe(true);
+		const serialized = JSON.stringify(persisted);
+		expect(serialized.length).toBeLessThan(2_000);
 
-		const text = message.content[1];
-		if (text?.type !== "text") throw new Error("Expected text block");
-		expect(text.text.length).toBeLessThan(600_000);
-		expect(text.text.endsWith(truncationNotice)).toBe(true);
+		const entries = [JSON.parse(serialized)] as FileEntry[];
+		await resolveBlobRefsInEntries(entries, blobStore);
+		const restored = entries[0];
+		if (restored?.type !== "message" || restored.message.role !== "assistant") {
+			throw new Error("Expected restored assistant message");
+		}
+		const restoredThinking = restored.message.content[0];
+		const restoredText = restored.message.content[1];
+		if (restoredThinking?.type !== "thinking" || restoredText?.type !== "text") {
+			throw new Error("Expected restored thinking and text blocks");
+		}
+		expect(restoredThinking.thinking).toBe(thinkingText);
+		expect(restoredText.text).toBe(responseText);
+		expect(restored.persistedTextBlobs).toBeUndefined();
+	});
+
+	it("keeps non-Unicode oversized text inline without publishing a blob", async () => {
+		using tempDir = TempDir.createSync("@pi-session-atomic-invalid-text-");
+		const blobStore = new BlobStore(tempDir.path());
+		const invalidText = `${"u".repeat(600_000)}\ud800`;
+		const entry = assistantEntry([{ type: "text", text: invalidText }], undefined);
+
+		const persisted = prepareEntryForPersistence(entry, blobStore);
+		expect(await fs.readdir(tempDir.path())).toEqual([]);
+		if (persisted.type !== "message" || persisted.message.role !== "assistant") {
+			throw new Error("Expected persisted assistant message");
+		}
+		const persistedText = persisted.message.content[0];
+		if (persistedText?.type !== "text") throw new Error("Expected persisted text block");
+		expect(persistedText.text).toBe(invalidText);
+		expect(persisted.persistedTextBlobs).toBeUndefined();
+		const originalText = (entry.message as AssistantMessage).content[0];
+		if (originalText?.type !== "text") throw new Error("Expected original text block");
+		expect(originalText.text).toBe(invalidText);
+	});
+
+	it("fails replay when an externalized text blob is corrupt or missing", async () => {
+		using tempDir = TempDir.createSync("@pi-session-atomic-corrupt-");
+		const blobStore = new BlobStore(tempDir.path());
+		const entry = assistantEntry([{ type: "text", text: "z".repeat(600_000) }], undefined);
+		const persisted = prepareEntryForPersistence(entry, blobStore);
+		if (persisted.type !== "message" || persisted.message.role !== "assistant") {
+			throw new Error("Expected persisted assistant message");
+		}
+		const location = persisted.persistedTextBlobs?.[0];
+		if (!location || !isPersistedTextBlob(location.blob)) {
+			throw new Error("Expected persisted text blob marker");
+		}
+		const serialized = JSON.stringify(persisted);
+		const blobPath = path.join(tempDir.path(), location.blob.ref.slice("blob:sha256:".length));
+
+		await Bun.write(blobPath, "corrupt");
+		await expect(resolveBlobRefsInEntries([JSON.parse(serialized)] as FileEntry[], blobStore)).rejects.toThrow(
+			"hash mismatch",
+		);
+
+		await fs.unlink(blobPath);
+		await expect(resolveBlobRefsInEntries([JSON.parse(serialized)] as FileEntry[], blobStore)).rejects.toThrow(
+			"Missing persisted text blob",
+		);
+	});
+	it("preserves marker-shaped model and tool data as ordinary JSON", async () => {
+		using tempDir = TempDir.createSync("@pi-session-atomic-malformed-");
+		const blobStore = new BlobStore(tempDir.path());
+		const put = blobStore.putSync(Buffer.from("referenced text"));
+		const markerShaped = [
+			{ type: "omp.session.text-blob.v1", chars: 1 },
+			{ type: "omp.session.text-blob.v1", ref: put.ref, chars: "1" },
+			{ type: "omp.session.text-blob.v1", ref: put.ref, chars: 15 },
+		];
+
+		for (const marker of markerShaped) {
+			const entry = {
+				type: "custom",
+				id: "marker-shaped-data",
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				customType: "probe",
+				data: { marker },
+			} as FileEntry;
+			await resolveBlobRefsInEntries([entry], blobStore);
+			expect((entry as Extract<FileEntry, { type: "custom" }>).data).toEqual({ marker });
+		}
+	});
+
+	it("fails closed for malformed entry-owned text blob metadata", async () => {
+		using tempDir = TempDir.createSync("@pi-session-atomic-malformed-metadata-");
+		const blobStore = new BlobStore(tempDir.path());
+		const entry = {
+			type: "custom",
+			id: "malformed-marker-metadata",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			customType: "probe",
+			data: { marker: null },
+			persistedTextBlobs: [
+				{
+					path: ["data", "marker"],
+					blob: { type: "omp.session.text-blob.v1", ref: "blob:sha256:not-a-hash", chars: 1 },
+				},
+			],
+		} as FileEntry;
+
+		await expect(resolveBlobRefsInEntries([entry], blobStore)).rejects.toThrow(
+			"Invalid persisted text blob metadata",
+		);
+	});
+
+	it("does not interpret marker-shaped data inside authenticated provider blocks", async () => {
+		using tempDir = TempDir.createSync("@pi-session-atomic-authenticated-marker-");
+		const blobStore = new BlobStore(tempDir.path());
+		const put = blobStore.putSync(Buffer.from("provider-protected-text"));
+		const marker = { type: "omp.session.text-blob.v1", ref: put.ref, chars: 23 };
+		const entry = {
+			type: "custom",
+			id: "authenticated-marker",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			customType: "probe",
+			data: { type: "reasoning", encrypted_content: "ciphertext", nested: marker },
+		} as FileEntry;
+
+		await resolveBlobRefsInEntries([entry], blobStore);
+		expect((entry as Extract<FileEntry, { type: "custom" }>).data).toEqual({
+			type: "reasoning",
+			encrypted_content: "ciphertext",
+			nested: marker,
+		});
+	});
+	it("resolves entry-owned blobs transactionally before mutating placeholders", async () => {
+		using tempDir = TempDir.createSync("@pi-session-atomic-transactional-");
+		const blobStore = new BlobStore(tempDir.path());
+		const first = blobStore.putSync(Buffer.from("first-value"));
+		const entry = {
+			type: "custom",
+			id: "transactional-metadata",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			customType: "probe",
+			data: { first: null, second: null },
+			persistedTextBlobs: [
+				{
+					path: ["data", "first"],
+					blob: { type: "omp.session.text-blob.v1", ref: first.ref, chars: 11 },
+				},
+				{
+					path: ["data", "second"],
+					blob: { type: "omp.session.text-blob.v1", ref: `blob:sha256:${"f".repeat(64)}`, chars: 6 },
+				},
+			],
+		} as FileEntry;
+
+		await expect(resolveBlobRefsInEntries([entry], blobStore)).rejects.toThrow("Missing persisted text blob");
+		expect((entry as Extract<FileEntry, { type: "custom" }>).data).toEqual({ first: null, second: null });
+		expect((entry as Extract<FileEntry, { type: "custom" }>).persistedTextBlobs).toHaveLength(2);
+	});
+
+	it("rejects duplicate paths and paths inside provider-authenticated blocks", async () => {
+		using tempDir = TempDir.createSync("@pi-session-atomic-path-validation-");
+		const blobStore = new BlobStore(tempDir.path());
+		const put = blobStore.putSync(Buffer.from("safe"));
+		const blob = { type: "omp.session.text-blob.v1" as const, ref: put.ref, chars: 4 };
+		const duplicate = {
+			type: "custom",
+			id: "duplicate-path",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			customType: "probe",
+			data: { value: null },
+			persistedTextBlobs: [
+				{ path: ["data", "value"], blob },
+				{ path: ["data", "value"], blob },
+			],
+		} as FileEntry;
+		await expect(resolveBlobRefsInEntries([duplicate], blobStore)).rejects.toThrow("duplicate path");
+
+		const authenticated = {
+			type: "custom",
+			id: "authenticated-path",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			customType: "probe",
+			data: { type: "reasoning", encrypted_content: "ciphertext", nested: null },
+			persistedTextBlobs: [{ path: ["data", "nested"], blob }],
+		} as FileEntry;
+		await expect(resolveBlobRefsInEntries([authenticated], blobStore)).rejects.toThrow(
+			"path enters a provider-authenticated block",
+		);
+	});
+
+	it("restores dangerous object keys without mutating the prototype", async () => {
+		using tempDir = TempDir.createSync("@pi-session-atomic-prototype-key-");
+		const blobStore = new BlobStore(tempDir.path());
+		const put = blobStore.putSync(Buffer.from("ordinary-own-value"));
+		const data = JSON.parse('{"__proto__":null}') as Record<string, unknown>;
+		const entry = {
+			type: "custom",
+			id: "prototype-key",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			customType: "probe",
+			data,
+			persistedTextBlobs: [
+				{
+					path: ["data", "__proto__"],
+					blob: { type: "omp.session.text-blob.v1", ref: put.ref, chars: 18 },
+				},
+			],
+		} as FileEntry;
+
+		await resolveBlobRefsInEntries([entry], blobStore);
+		expect(Object.getPrototypeOf(data)).toBe(Object.prototype);
+		expect(Object.hasOwn(data, "__proto__")).toBe(true);
+		expect(Object.getOwnPropertyDescriptor(data, "__proto__")?.value).toBe("ordinary-own-value");
+		expect((entry as Extract<FileEntry, { type: "custom" }>).persistedTextBlobs).toBeUndefined();
 	});
 
 	it("survives a full JSONL string round-trip for signed thinking", () => {

@@ -3,7 +3,23 @@ import type { ImageContent, MessageAttribution, ServiceTierByFamily, TextContent
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import type { CompactionMethod } from "./compaction-methods";
 
-export const CURRENT_SESSION_VERSION = 3;
+export const CURRENT_SESSION_VERSION = 4;
+
+export interface PersistedTextBlobValue {
+	type: "omp.session.text-blob.v1";
+	ref: string;
+	chars: number;
+}
+
+export interface PersistedTextBlobLocation {
+	path: Array<string | number>;
+	blob: PersistedTextBlobValue;
+}
+
+export interface SessionPersistenceFields {
+	/** Entry-owned paths for oversized strings externalized from the persisted payload. */
+	persistedTextBlobs?: PersistedTextBlobLocation[];
+}
 
 export const SESSION_TITLE_SLOT_BYTES = 256;
 
@@ -72,7 +88,7 @@ export interface NewSessionOptions {
 	additionalDirectories?: string[];
 }
 
-export interface SessionEntryBase {
+export interface SessionEntryBase extends SessionPersistenceFields {
 	type: string;
 	id: string;
 	parentId: string | null;

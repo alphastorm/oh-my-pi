@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { FileEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { CURRENT_SESSION_VERSION, type FileEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { migrateSessionEntries } from "@oh-my-pi/pi-coding-agent/session/session-migrations";
 
 describe("migrateSessionEntries", () => {
@@ -26,7 +26,7 @@ describe("migrateSessionEntries", () => {
 		migrateSessionEntries(entries);
 
 		// Header should have version set to current
-		expect((entries[0] as any).version).toBe(3);
+		expect((entries[0] as any).version).toBe(CURRENT_SESSION_VERSION);
 
 		// Entries should have id/parentId
 		const msg1 = entries[1] as any;
@@ -75,5 +75,40 @@ describe("migrateSessionEntries", () => {
 		expect((entries[1] as any).id).toBe("abc12345");
 		expect((entries[2] as any).id).toBe("def67890");
 		expect((entries[2] as any).parentId).toBe("abc12345");
+	});
+
+	it("bumps v3 journals to the entry-owned blob metadata format", () => {
+		const entries = [
+			{ type: "session", version: 3, id: "sess-v3", timestamp: "2025-01-01T00:00:00Z", cwd: "/tmp" },
+			{
+				type: "message",
+				id: "message-v3",
+				parentId: null,
+				timestamp: "2025-01-01T00:00:01Z",
+				message: { role: "user", content: "unchanged", timestamp: 1 },
+			},
+		] as FileEntry[];
+
+		migrateSessionEntries(entries);
+		expect((entries[0] as { version: number }).version).toBe(CURRENT_SESSION_VERSION);
+		expect((entries[1] as Extract<FileEntry, { type: "message" }>).message).toEqual({
+			role: "user",
+			content: "unchanged",
+			timestamp: 1,
+		});
+	});
+
+	it("rejects journals from a future persistence format", () => {
+		const entries = [
+			{
+				type: "session",
+				version: CURRENT_SESSION_VERSION + 1,
+				id: "future",
+				timestamp: "2025-01-01T00:00:00Z",
+				cwd: "/tmp",
+			},
+		] as FileEntry[];
+
+		expect(() => migrateSessionEntries(entries)).toThrow("Unsupported session version");
 	});
 });

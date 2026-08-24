@@ -64,10 +64,16 @@ export function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 	const header = entries.find(e => e.type === "session") as SessionHeader | undefined;
 	const version = header?.version ?? 1;
 
-	if (version >= CURRENT_SESSION_VERSION) return false;
+	if (version > CURRENT_SESSION_VERSION) {
+		throw new Error(
+			`Unsupported session version ${version}; this runtime supports through ${CURRENT_SESSION_VERSION}`,
+		);
+	}
+	if (version === CURRENT_SESSION_VERSION) return false;
 
 	if (version < 2) migrateV1ToV2(entries);
 	if (version < 3) migrateV2ToV3(entries);
+	if (version < 4 && header) header.version = 4;
 
 	return true;
 }

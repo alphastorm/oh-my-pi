@@ -82,6 +82,143 @@ function ensureDisplayPathSync(blobPath: string, displayPath: string, data: Buff
 	fs.writeFileSync(displayPath, data);
 }
 
+function hasFsCode(error: unknown, code: string): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function blobMatchesHash(data: Buffer, expectedHash: string): boolean {
+	return new Bun.SHA256().update(data).digest("hex") === expectedHash;
+}
+
+function isUnsupportedDirectorySync(error: unknown): boolean {
+	if (hasFsCode(error, "EINVAL") || hasFsCode(error, "ENOTSUP") || hasFsCode(error, "ENOSYS")) return true;
+	return process.platform === "win32" && (hasFsCode(error, "EPERM") || hasFsCode(error, "EISDIR"));
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+	let handle: fsp.FileHandle | undefined;
+	try {
+		handle = await fsp.open(directory, "r");
+		await handle.sync();
+	} catch (error) {
+		if (!isUnsupportedDirectorySync(error)) throw error;
+	} finally {
+		await handle?.close();
+	}
+}
+
+function syncDirectorySync(directory: string): void {
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(directory, "r");
+		fs.fsyncSync(fd);
+	} catch (error) {
+		if (!isUnsupportedDirectorySync(error)) throw error;
+	} finally {
+		if (fd !== undefined) fs.closeSync(fd);
+	}
+}
+
+async function existingBlobMatches(blobPath: string, hash: string): Promise<boolean> {
+	try {
+		return blobMatchesHash(await fsp.readFile(blobPath), hash);
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
+	}
+}
+
+function existingBlobMatchesSync(blobPath: string, hash: string): boolean {
+	try {
+		return blobMatchesHash(fs.readFileSync(blobPath), hash);
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
+	}
+}
+
+async function publishBlob(blobPath: string, data: Buffer, hash: string): Promise<void> {
+	const directory = path.dirname(blobPath);
+	await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
+	if (await existingBlobMatches(blobPath, hash)) return;
+
+	const tempPath = path.join(directory, `.${path.basename(blobPath)}.${Bun.randomUUIDv7()}.tmp`);
+	let handle: fsp.FileHandle | undefined;
+	let tempExists = false;
+	try {
+		handle = await fsp.open(tempPath, "wx", 0o600);
+		tempExists = true;
+		await handle.writeFile(data);
+		await handle.sync();
+		await handle.close();
+		handle = undefined;
+		try {
+			await fsp.link(tempPath, blobPath);
+		} catch (error) {
+			if (!hasFsCode(error, "EEXIST")) throw error;
+			if (!(await existingBlobMatches(blobPath, hash))) {
+				// The predecessor wrote canonical paths directly. Replace only content
+				// that violates its own hash name, using the complete fsynced temp file.
+				await fsp.rename(tempPath, blobPath);
+				tempExists = false;
+			}
+		}
+		if (tempExists) {
+			await fsp.unlink(tempPath);
+			tempExists = false;
+		}
+		await syncDirectory(directory);
+	} catch (error) {
+		await handle?.close().catch(() => {});
+		if (tempExists) await fsp.unlink(tempPath).catch(() => {});
+		throw error;
+	}
+}
+
+function publishBlobSync(blobPath: string, data: Buffer, hash: string): void {
+	const directory = path.dirname(blobPath);
+	fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+	if (existingBlobMatchesSync(blobPath, hash)) return;
+
+	const tempPath = path.join(directory, `.${path.basename(blobPath)}.${Bun.randomUUIDv7()}.tmp`);
+	let fd: number | undefined;
+	let tempExists = false;
+	try {
+		fd = fs.openSync(tempPath, "wx", 0o600);
+		tempExists = true;
+		fs.writeFileSync(fd, data);
+		fs.fsyncSync(fd);
+		fs.closeSync(fd);
+		fd = undefined;
+		try {
+			fs.linkSync(tempPath, blobPath);
+		} catch (error) {
+			if (!hasFsCode(error, "EEXIST")) throw error;
+			if (!existingBlobMatchesSync(blobPath, hash)) {
+				fs.renameSync(tempPath, blobPath);
+				tempExists = false;
+			}
+		}
+		if (tempExists) {
+			fs.unlinkSync(tempPath);
+			tempExists = false;
+		}
+		syncDirectorySync(directory);
+	} catch (error) {
+		if (fd !== undefined) {
+			try {
+				fs.closeSync(fd);
+			} catch {}
+		}
+		if (tempExists) {
+			try {
+				fs.unlinkSync(tempPath);
+			} catch {}
+		}
+		throw error;
+	}
+}
+
 export function blobExtensionForImageMimeType(mimeType: string | undefined): string | undefined {
 	if (!mimeType) return undefined;
 	const lower = mimeType.toLowerCase();
@@ -100,7 +237,10 @@ export class BlobStore {
 	 * @returns SHA-256 hex hash of the data
 	 */
 	async put(data: Buffer, options?: BlobPutOptions): Promise<BlobPutResult> {
-		const hash = new Bun.SHA256().update(data).digest("hex");
+		// The first await in publishBlob yields to the caller. Snapshot caller-owned
+		// bytes before hashing so later mutation cannot publish under a stale path.
+		const stableData = Buffer.from(data);
+		const hash = new Bun.SHA256().update(stableData).digest("hex");
 		const blobPath = path.join(this.dir, hash);
 		const extension = normalizeBlobExtension(options?.extension);
 		const displayPath = extension ? `${blobPath}.${extension}` : blobPath;
@@ -113,8 +253,8 @@ export class BlobStore {
 			},
 		};
 
-		await Bun.write(blobPath, data);
-		await ensureDisplayPath(blobPath, displayPath, data);
+		await publishBlob(blobPath, stableData, hash);
+		await ensureDisplayPath(blobPath, displayPath, stableData);
 		return result;
 	}
 
@@ -136,8 +276,7 @@ export class BlobStore {
 				return `${BLOB_PREFIX}${hash}`;
 			},
 		};
-		fs.mkdirSync(this.dir, { recursive: true });
-		fs.writeFileSync(blobPath, data);
+		publishBlobSync(blobPath, data, hash);
 		ensureDisplayPathSync(blobPath, displayPath, data);
 		return result;
 	}
@@ -222,6 +361,23 @@ export function externalizeImageDataUrlSync(blobStore: BlobStore, dataUrl: strin
 	return blobStore.putSync(Buffer.from(dataUrl, "utf8")).ref;
 }
 
+/** Externalize replay-critical text, or return null when UTF-8 cannot represent its code units exactly. */
+export function externalizeTextDataSync(blobStore: BlobStore, text: string): string | null {
+	for (let i = 0; i < text.length; i++) {
+		const codeUnit = text.charCodeAt(i);
+		if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+			const next = text.charCodeAt(i + 1);
+			if (next >= 0xdc00 && next <= 0xdfff) {
+				i++;
+				continue;
+			}
+			return null;
+		}
+		if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) return null;
+	}
+	return blobStore.putSync(Buffer.from(text, "utf8")).ref;
+}
+
 /**
  * Externalize an image's base64 data to the blob store, returning a blob reference.
  * If the data is already a blob reference, returns it unchanged.
@@ -262,6 +418,28 @@ export async function resolveImageDataUrl(blobStore: BlobStore, data: string): P
 		return data;
 	}
 	return buffer.toString("utf8");
+}
+
+/** Resolve and validate replay-critical UTF-8 text externalized by session persistence. */
+export async function resolveTextData(blobStore: BlobStore, data: string, expectedChars: number): Promise<string> {
+	const hash = parseBlobRef(data);
+	if (!hash) throw new Error("Invalid persisted text blob reference");
+
+	const buffer = await blobStore.get(hash);
+	if (!buffer) throw new Error(`Missing persisted text blob: ${hash}`);
+	const actualHash = new Bun.SHA256().update(buffer).digest("hex");
+	if (actualHash !== hash) throw new Error(`Persisted text blob hash mismatch: ${hash}`);
+
+	let text: string;
+	try {
+		text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+	} catch (error) {
+		throw new Error(`Persisted text blob is not valid UTF-8: ${hash}`, { cause: error });
+	}
+	if (text.length !== expectedChars) {
+		throw new Error(`Persisted text blob character count mismatch: ${hash}`);
+	}
+	return text;
 }
 
 /**

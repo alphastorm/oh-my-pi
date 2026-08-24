@@ -133,6 +133,30 @@ export interface ResumedExactCheckpoint {
 }
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
+const SYSTEM_PROMPT_CUSTOM_TYPE = "omp:system-prompt";
+
+export interface PersistedSystemPromptState {
+	parts: string[];
+	xdevCatalogNames: string[];
+	model?: string;
+}
+
+interface PersistedSystemPromptData extends PersistedSystemPromptState {
+	schemaVersion: 1;
+}
+
+function readPersistedSystemPromptData(data: unknown): PersistedSystemPromptState | undefined {
+	if (typeof data !== "object" || data === null) return undefined;
+	if (!("schemaVersion" in data) || data.schemaVersion !== 1) return undefined;
+	if (!("parts" in data) || !Array.isArray(data.parts) || !data.parts.every(part => typeof part === "string")) {
+		return undefined;
+	}
+	const xdevCatalogNames = "xdevCatalogNames" in data ? data.xdevCatalogNames : [];
+	if (!Array.isArray(xdevCatalogNames) || !xdevCatalogNames.every(name => typeof name === "string")) return undefined;
+	const model = "model" in data ? data.model : undefined;
+	if (model !== undefined && typeof model !== "string") return undefined;
+	return { parts: [...data.parts], xdevCatalogNames: [...xdevCatalogNames], ...(model ? { model } : {}) };
+}
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
 const DISCARDED_ENTRY_BRANCH_MARKER = "discarded-entry-branch";
 const RUNTIME_VARIANT = process.env.OMP_RUNTIME_VARIANT === "code-mode" ? "code-mode" : "main";
@@ -246,13 +270,10 @@ function isAssistantEntry(entry: SessionEntry): boolean {
 }
 
 function isDraftOnlyMetadataEntry(entry: SessionEntry): boolean {
-	// Startup-recorded selector state that does not survive as user intent
-	// once the draft is cleared. `mode_change` covers the `plan.defaultOnStartup`
-	// path (interactive-mode.ts enters plan mode before draft restoration) and
-	// `/plan` toggles that leave the session otherwise empty; entries carrying
-	// real conversation state — messages, compactions, branch summaries,
-	// custom/custom_message, session_init, labels, title/tool selection — never
-	// reach this branch and always keep the file resumable.
+	// Startup-recorded selector and prompt state do not survive as user intent
+	// once the draft is cleared. Entries carrying real conversation state keep
+	// the file resumable.
+	if (entry.type === "custom" && entry.customType === SYSTEM_PROMPT_CUSTOM_TYPE) return true;
 	switch (entry.type) {
 		case "model_change":
 		case "thinking_level_change":
@@ -2559,6 +2580,43 @@ export class SessionManager {
 		const entry: ResetBoundaryEntry = { type: "reset_boundary", ...this.#freshEntryFields() };
 		this.#recordEntry(entry);
 		return entry.id;
+	}
+
+	/** Exact assembled system-prompt state most recently active on the current branch. */
+	getPersistedSystemPromptState(): PersistedSystemPromptState | undefined {
+		const branch = this.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry.type !== "custom" || entry.customType !== SYSTEM_PROMPT_CUSTOM_TYPE) continue;
+			const state = readPersistedSystemPromptData(entry.data);
+			if (!state) throw new Error("Invalid persisted system prompt state");
+			return state;
+		}
+		return undefined;
+	}
+
+	/** Exact assembled system-prompt parts most recently active on the current branch. */
+	getPersistedSystemPrompt(): string[] | undefined {
+		return this.getPersistedSystemPromptState()?.parts;
+	}
+
+	/** Append a prompt revision when its parts, rendered xd:// catalog, or model changed. */
+	setPersistedSystemPrompt(parts: readonly string[], xdevCatalogNames: readonly string[] = [], model?: string): void {
+		const next: PersistedSystemPromptState = {
+			parts: [...parts],
+			xdevCatalogNames: [...xdevCatalogNames],
+			...(model ? { model } : {}),
+		};
+		const current = this.getPersistedSystemPromptState();
+		const sameParts =
+			current?.parts.length === next.parts.length &&
+			current.parts.every((part, index) => part === next.parts[index]);
+		const sameCatalog =
+			current?.xdevCatalogNames.length === next.xdevCatalogNames.length &&
+			current.xdevCatalogNames.every((name, index) => name === next.xdevCatalogNames[index]);
+		if (current && sameParts && sameCatalog && current.model === next.model) return;
+		const data: PersistedSystemPromptData = { schemaVersion: 1, ...next };
+		this.appendCustomEntry(SYSTEM_PROMPT_CUSTOM_TYPE, data);
 	}
 
 	appendCustomEntry(customType: string, data?: unknown): string {

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { CURRENT_SESSION_VERSION, type SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -40,7 +40,7 @@ describe("SessionManager.createEmptySessionFile", () => {
 		expect(entries.length).toBe(1);
 		const header = entries[0] as SessionHeader;
 		expect(header.type).toBe("session");
-		expect(header.version).toBe(3);
+		expect(header.version).toBe(CURRENT_SESSION_VERSION);
 		expect(header.id).toBeTruthy();
 		expect(header.cwd).toBe(path.resolve(cwd));
 	});

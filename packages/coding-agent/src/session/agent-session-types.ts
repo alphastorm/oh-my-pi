@@ -225,6 +225,8 @@ export interface AgentSessionConfig {
 	rawSseDebugBuffer?: RawSseDebugBuffer;
 	/** Current session message-to-LLM conversion pipeline. */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	/** xd:// catalog names already rendered into the base system prompt. */
+	basePromptXdevNames?: readonly string[];
 	/** System prompt builder that can consider tool availability. */
 	rebuildSystemPrompt?: (
 		toolNames: string[],

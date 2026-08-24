@@ -277,9 +277,9 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
-import type { ExactCheckpointReceipt } from "./exact-checkpoint";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
+import type { ExactCheckpointReceipt } from "./exact-checkpoint";
 import {
 	collectPendingToolCalls,
 	createInterruptedTurnAbortMessage,
@@ -345,9 +345,9 @@ import {
 	type SessionMaintenanceHost,
 } from "./session-maintenance";
 import {
+	type CreateExactCheckpointOptions,
 	cleanupEmptyMoveSession,
 	copySessionArtifacts,
-	type CreateExactCheckpointOptions,
 	type SessionManager,
 } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
@@ -357,21 +357,21 @@ import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-sta
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
-import { ToolChoiceQueue } from "./tool-choice-queue";
 import {
-	TerminalReceiptAccumulator,
 	type TerminalReceipt,
+	TerminalReceiptAccumulator,
 	type TerminalReceiptListener,
 	terminalReceiptStatus,
 } from "./terminal-receipt";
+import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
-export * from "./terminal-receipt";
 export * from "./agent-session-types";
 export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
+export * from "./terminal-receipt";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
@@ -1437,6 +1437,7 @@ export class AgentSession {
 			setDeviceOnlyWrite: config.setDeviceOnlyWrite,
 			setPendingFullWriteDescription: config.setPendingFullWriteDescription,
 			ensureGoalRegistered: config.ensureGoalRegistered,
+			basePromptXdevNames: config.basePromptXdevNames,
 			rebuildSystemPrompt: config.rebuildSystemPrompt,
 			getMcpServerInstructions: config.getMcpServerInstructions,
 			xdev: config.xdev,
@@ -7510,7 +7511,6 @@ export class AgentSession {
 		} finally {
 			if (advisorRecordersDetached) this.#advisors.reattachRecorderFeeds();
 		}
-
 	}
 
 	/** Move the active session and artifacts after enforcing mode transition invariants. */
@@ -8970,7 +8970,6 @@ export class AgentSession {
 				else this.#advisors.reattachRecorderFeeds();
 			}
 		}
-
 	}
 
 	// =========================================================================

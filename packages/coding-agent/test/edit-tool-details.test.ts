@@ -35,6 +35,32 @@ afterEach(async () => {
 });
 
 describe("EditTool details", () => {
+	test("routes an unmistakable apply-patch envelope submitted to the hashline tool", async () => {
+		const targetPath = path.join(tempDir, "target.txt");
+		await Bun.write(targetPath, "before\n");
+		const input = ["*** Begin Patch", "*** Update File: target.txt", "@@", "-before", "+after", "*** End Patch"].join(
+			"\n",
+		);
+
+		const tool = new EditTool(makeSession(tempDir), "hashline");
+		// Approval, approval details, and execution must all agree that this
+		// payload is an apply-patch envelope even though the tool is in
+		// hashline mode: `resolvePayloadEditMode` re-resolves it at every
+		// mode chokepoint.
+		expect(tool.formatApprovalDetails({ input })).toEqual(["File: target.txt"]);
+		const result = await tool.execute("hashline-apply-patch-envelope", { input });
+		expect(result.isError).not.toBe(true);
+		expect(await Bun.file(targetPath).text()).toBe("after\n");
+
+		// A genuine hashline payload still runs as hashline.
+		const hashlinePath = path.join(tempDir, "plain.txt");
+		await Bun.write(hashlinePath, "one\n");
+		const plain = await tool.execute("hashline-plain", {
+			input: "*** Begin Patch is only a marker when a file header follows it\n",
+		});
+		expect(plain.isError).toBe(true);
+	});
+
 	test("apply_patch reports complete per-file update, move, and create details", async () => {
 		await Bun.write(path.join(tempDir, "update.txt"), "old\n");
 		await Bun.write(path.join(tempDir, "move.txt"), "move me\n");

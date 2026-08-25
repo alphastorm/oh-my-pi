@@ -327,6 +327,17 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 	return true;
 }
 
+function resolvePayloadEditMode(mode: EditMode, args: unknown): EditMode {
+	if (mode !== "hashline" || !args || typeof args !== "object") return mode;
+	const input = (args as Record<string, unknown>).input;
+	if (typeof input !== "string" || !input.startsWith("*** Begin Patch")) return mode;
+	return input.includes("\n*** Add File:") ||
+		input.includes("\n*** Update File:") ||
+		input.includes("\n*** Delete File:")
+		? "apply_patch"
+		: mode;
+}
+
 export class EditTool implements AgentTool<TInput> {
 	readonly name = "edit";
 	readonly label = "Edit";
@@ -475,9 +486,15 @@ export class EditTool implements AgentTool<TInput> {
 		_onUpdate?: AgentToolUpdateCallback<EditToolDetails, TInput>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
+		const mode = resolvePayloadEditMode(this.mode, params);
 		let editSession = this.#sessions.get(toolCallId);
 		const argsJson = JSON.stringify(params);
-		if (editSession && this.#streamedArgs.get(toolCallId) !== argsJson) {
+		// A streamed session was opened before the payload existed, so it carries
+		// the declared mode. An unmistakable apply-patch envelope re-resolves the
+		// mode here; rebuild the session so execution matches what `#inspect`
+		// already reported to approval and the matchers. A payload a pre-execution
+		// hook revised is rebuilt for the same reason.
+		if (editSession && (mode !== this.mode || this.#streamedArgs.get(toolCallId) !== argsJson)) {
 			editSession.close();
 			this.#sessions.delete(toolCallId);
 			editSession = undefined;
@@ -487,7 +504,7 @@ export class EditTool implements AgentTool<TInput> {
 			// No deltas were streamed (non-streaming provider, inline recovery,
 			// Cursor batch frames), or a pre-execution hook revised the arguments:
 			// the parsed args are the whole effective payload.
-			editSession = new EditSession(getEditStore(this.session), this.#policy(false));
+			editSession = new EditSession(getEditStore(this.session), this.#policy(false, mode));
 			editSession.setArgsJson(argsJson);
 			editSession.finish();
 		}
@@ -514,12 +531,12 @@ export class EditTool implements AgentTool<TInput> {
 			return { content: [{ type: "text", text: outcome.text }], isError: true };
 		}
 
-		const details = aggregateDetails(outcome.files, this.mode);
+		const details = aggregateDetails(outcome.files, mode);
 		const result: AgentToolResult<EditToolDetails, TInput> = {
 			content: [{ type: "text", text: outcome.text }],
 			...(details ? { details } : {}),
 		};
-		const record = createEditBlackboxRecorder(this.session, this.mode, params);
+		const record = createEditBlackboxRecorder(this.session, mode, params);
 		const notes: string[] = [];
 		for (const file of outcome.files) {
 			if (!file.parseRegressed || file.oldText === undefined || file.newText === undefined) continue;
@@ -561,13 +578,13 @@ export class EditTool implements AgentTool<TInput> {
 
 	#inspect(args: unknown): EditInspection {
 		try {
-			return editInspect(this.mode, JSON.stringify(args ?? {}));
+			return editInspect(resolvePayloadEditMode(this.mode, args), JSON.stringify(args ?? {}));
 		} catch {
 			return { paths: [], entries: [], fileOps: [] };
 		}
 	}
 
-	#policy(rawInput: boolean): EditPolicy {
+	#policy(rawInput: boolean, mode: EditMode = this.mode): EditPolicy {
 		let localSandboxRoot: string | undefined;
 		try {
 			localSandboxRoot = path.resolve(resolveLocalRoot(planLocalProtocolOptions(this.session)));
@@ -576,7 +593,7 @@ export class EditTool implements AgentTool<TInput> {
 		}
 		return {
 			cwd: this.session.cwd,
-			mode: this.mode,
+			mode,
 			allowFuzzy: this.#allowFuzzy,
 			fuzzyThreshold: this.#fuzzyThreshold,
 			enforceSeenLines: this.session.settings.get("edit.enforceSeenLines"),

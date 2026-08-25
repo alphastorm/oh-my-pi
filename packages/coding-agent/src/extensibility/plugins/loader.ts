@@ -467,8 +467,8 @@ export function resolvePluginExtensionPaths(plugin: InstalledPlugin): string[] {
 /**
  * Get all tool paths from all enabled plugins.
  */
-export async function getAllPluginToolPaths(cwd: string): Promise<string[]> {
-	const plugins = await getEnabledPlugins(cwd);
+export async function getAllPluginToolPaths(cwd: string, opts: { home?: string } = {}): Promise<string[]> {
+	const plugins = await getEnabledPlugins(cwd, opts);
 	const paths: string[] = [];
 
 	for (const plugin of plugins) {

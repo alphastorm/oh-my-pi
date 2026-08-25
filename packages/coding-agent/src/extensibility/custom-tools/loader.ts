@@ -235,7 +235,11 @@ export async function loadCustomTools(
  * @param configuredPaths - Explicit paths from settings.json and CLI --tool flags
  * @param cwd - Current working directory
  */
-export async function discoverCustomToolPaths(configuredPaths: string[], cwd: string): Promise<ToolPathWithSource[]> {
+export async function discoverCustomToolPaths(
+	configuredPaths: string[],
+	cwd: string,
+	home?: string,
+): Promise<ToolPathWithSource[]> {
 	const allPathsWithSources: ToolPathWithSource[] = [];
 	const seen = new Set<string>();
 
@@ -259,7 +263,7 @@ export async function discoverCustomToolPaths(configuredPaths: string[], cwd: st
 	}
 
 	// 2. Plugin tools: ~/.omp/plugins/node_modules/*/
-	for (const pluginPath of await getAllPluginToolPaths(cwd)) {
+	for (const pluginPath of await getAllPluginToolPaths(cwd, { home })) {
 		addPath(pluginPath, { provider: "plugin", providerName: "Plugin", level: "user" });
 	}
 

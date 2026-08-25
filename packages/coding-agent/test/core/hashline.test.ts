@@ -14,6 +14,7 @@ import {
 	type ExecuteHashlineSingleOptions,
 	executeHashlineSingle,
 	getFileSnapshotStore as getFileReadCache,
+	EditTool,
 	HashlineFilesystem,
 	hashlineEditParamsSchema,
 } from "@oh-my-pi/pi-coding-agent/edit";
@@ -333,6 +334,46 @@ describe("hashlineEditParamsSchema — payload shape", () => {
 	it("still requires `input`", () => {
 		const result = arkSafeParse(hashlineEditParamsSchema, { path: "x.ts" });
 		expect(result.success).toBe(false);
+	});
+});
+
+describe("EditTool GPT hashline wire contract", () => {
+	it("advertises the parser grammar and auto-routes apply_patch", async () => {
+		await withTempDir(async tempDir => {
+			await Bun.write(path.join(tempDir, "config.yml"), "edit:\n  modelVariants:\n    gpt-5.6: hashline\n");
+			const settings = await Settings.loadReadOnly({ cwd: tempDir, agentDir: tempDir });
+			const session = {
+				cwd: tempDir,
+				settings,
+				enableLsp: false,
+				getActiveModelString: () => "openai-codex/gpt-5.6-sol",
+			} as ToolSession;
+			const tool = new EditTool(session);
+
+			expect(tool.mode).toBe("hashline");
+			const jsonSchema = tool.parameters.toJsonSchema() as {
+				properties?: { input?: { description?: string } };
+			};
+			const inputDescription = jsonSchema.properties?.input?.description ?? "";
+			expect(inputDescription).toContain("[PATH#TAG]");
+			expect(inputDescription).toContain("PUT N.=M:");
+			expect(inputDescription).toContain("*** Update File:");
+
+			const targetPath = path.join(tempDir, "target.txt");
+			await Bun.write(targetPath, "before\n");
+			const input = [
+				"*** Begin Patch",
+				"*** Update File: target.txt",
+				"@@",
+				"-before",
+				"+after",
+				"*** End Patch",
+			].join("\n");
+
+			expect(tool.formatApprovalDetails({ input })).toEqual(["File: target.txt"]);
+			await tool.execute("gpt-edit-contract", { input });
+			expect(await Bun.file(targetPath).text()).toBe("after\n");
+		});
 	});
 });
 

@@ -400,19 +400,30 @@ function extractApprovalPaths(args: unknown, mode: EditMode): string[] {
 	return typeof targetPath === "string" && targetPath.length > 0 ? [targetPath] : [];
 }
 
+function resolvePayloadEditMode(mode: EditMode, args: unknown): EditMode {
+	if (mode !== "hashline" || !args || typeof args !== "object") return mode;
+	const input = (args as Record<string, unknown>).input;
+	if (typeof input !== "string" || !input.startsWith("*** Begin Patch")) return mode;
+	return input.includes("\n*** Add File:") ||
+		input.includes("\n*** Update File:") ||
+		input.includes("\n*** Delete File:")
+		? "apply_patch"
+		: mode;
+}
+
 export class EditTool implements AgentTool<TInput> {
 	readonly approval = (args: unknown) => {
 		// Internal-resource edits (memory://, skill://, local://, …) are read-tier,
 		// but a payload that also targets a real workspace file must stay write-tier
 		// so the always-ask prompt still fires — `executeSloppy` writes every section
 		// regardless of the first one's scheme (#9353 review).
-		const targets = extractApprovalPaths(args, this.mode);
+		const targets = extractApprovalPaths(args, resolvePayloadEditMode(this.mode, args));
 		return targets.length > 0 && targets.every(target => resolveFileWriteApprovalTier(target) === "read")
 			? "read"
 			: "write";
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
-		const targets = extractApprovalPaths(args, this.mode);
+		const targets = extractApprovalPaths(args, resolvePayloadEditMode(this.mode, args));
 		if (targets.length === 0) return ["File: (unknown)"];
 		return targets.map(target => `File: ${truncateForPrompt(target)}`);
 	};
@@ -503,7 +514,7 @@ export class EditTool implements AgentTool<TInput> {
 	 * mode-specific patch grammar.
 	 */
 	matcherDigest(args: unknown): string | undefined {
-		return EDIT_MODE_STRATEGIES[this.mode].matcherDigest(args);
+		return EDIT_MODE_STRATEGIES[resolvePayloadEditMode(this.mode, args)].matcherDigest(args);
 	}
 
 	/**
@@ -513,7 +524,7 @@ export class EditTool implements AgentTool<TInput> {
 	 * section header / envelope marker) rather than a top-level argument.
 	 */
 	matcherPaths(args: unknown): readonly string[] | undefined {
-		return EDIT_MODE_STRATEGIES[this.mode].matcherPaths(args);
+		return EDIT_MODE_STRATEGIES[resolvePayloadEditMode(this.mode, args)].matcherPaths(args);
 	}
 
 	/**
@@ -524,7 +535,7 @@ export class EditTool implements AgentTool<TInput> {
 	 * actually belongs to a sibling Markdown hunk.
 	 */
 	matcherEntries(args: unknown): readonly { path: string; digest: string }[] | undefined {
-		return EDIT_MODE_STRATEGIES[this.mode].matcherEntries(args);
+		return EDIT_MODE_STRATEGIES[resolvePayloadEditMode(this.mode, args)].matcherEntries(args);
 	}
 
 	async execute(
@@ -534,8 +545,9 @@ export class EditTool implements AgentTool<TInput> {
 		onUpdate?: AgentToolUpdateCallback<EditToolDetails, TInput>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
-		const modeDefinition = this.#getModeDefinition();
-		const record = createEditBlackboxRecorder(this.session, this.mode, params);
+		const mode = resolvePayloadEditMode(this.mode, params);
+		const modeDefinition = this.#getModeDefinition(mode);
+		const record = createEditBlackboxRecorder(this.session, mode, params);
 		const parseFailures = new Map<string, AppliedEditSnapshot>();
 		const onApplied: AppliedEditObserver = async snapshot => {
 			// Diagnostic only: the edit has already committed, so a guard failure
@@ -589,7 +601,7 @@ export class EditTool implements AgentTool<TInput> {
 		return result;
 	}
 
-	#getModeDefinition(): EditModeDefinition {
+	#getModeDefinition(mode: EditMode = this.mode): EditModeDefinition {
 		const definitions = {
 			patch: {
 				description: () => prompt.render(patchDescription),
@@ -819,6 +831,6 @@ export class EditTool implements AgentTool<TInput> {
 				},
 			},
 		};
-		return definitions[this.mode];
+		return definitions[mode];
 	}
 }

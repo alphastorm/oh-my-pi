@@ -4,7 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
-import { loadCustomTools, type ToolPathWithSource } from "../../src/extensibility/custom-tools/loader";
+import {
+	discoverCustomToolPaths,
+	loadCustomTools,
+	type ToolPathWithSource,
+} from "../../src/extensibility/custom-tools/loader";
 
 let tempRoot: string | undefined;
 
@@ -73,6 +77,37 @@ const MISSING_NAME_SOURCE = [
 ].join("\n");
 
 describe("custom tool loader", () => {
+	it("scopes plugin tool discovery to an explicit home", async () => {
+		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-custom-tool-home-"));
+		const home = path.join(tempRoot, "home");
+		const workspace = path.join(tempRoot, "workspace");
+		const pluginsRoot = path.join(home, ".omp", "plugins");
+		const pluginRoot = path.join(pluginsRoot, "node_modules", "fixture-plugin");
+		const toolPath = path.join(pluginRoot, "tool.js");
+		await Promise.all([fs.mkdir(pluginRoot, { recursive: true }), fs.mkdir(workspace, { recursive: true })]);
+		await Promise.all([
+			fs.writeFile(
+				path.join(pluginsRoot, "package.json"),
+				JSON.stringify({ dependencies: { "fixture-plugin": "1.0.0" } }),
+			),
+			fs.writeFile(
+				path.join(pluginRoot, "package.json"),
+				JSON.stringify({
+					name: "fixture-plugin",
+					version: "1.0.0",
+					omp: { tools: "./tool.js" },
+				}),
+			),
+			fs.writeFile(toolPath, VALID_TOOL_SOURCE),
+		]);
+
+		const discovered = await discoverCustomToolPaths([], workspace, home);
+
+		expect(discovered).toContainEqual({
+			path: toolPath,
+			source: { provider: "plugin", providerName: "Plugin", level: "user" },
+		});
+	});
 	it("injects callable omptype-backed zod schemas through validation and wire emission", async () => {
 		const toolPath = await writeTool(
 			"zod-wire.js",

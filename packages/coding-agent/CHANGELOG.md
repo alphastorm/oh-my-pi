@@ -163,6 +163,8 @@
 - Added fast, cached conventional commit message generation to the git TUI and `omp commit --legacy`, including automatic handling of whitespace-only changes, clearer commit scopes, and improved grammar and tense in generated summaries.
 - The git TUI sidebar now supports collapsing and expanding the Unstaged and Staged sections, with keyboard shortcuts to stage or unstage an entire section.
 - Long streaming thinking and reasoning output now continues into terminal scrollback during a turn instead of remaining clipped to the viewport.
+- Added capability-gated, persisted NInfer Responses continuation with atomic session snapshots, exact request identity, and one-shot stale-chain recovery.
+- Added the registry-gated `omp appliance` lifecycle for checksum-pinned local NInfer services, read-only diagnostics, atomic route promotion, bounded qualification, and proven rollback.
 
 ### Changed
 

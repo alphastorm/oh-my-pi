@@ -25,7 +25,11 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 		resetSettingsForTest();
 	});
 
-	async function makeSession(goalEnabledAtStartup: boolean): Promise<AgentSession> {
+	async function makeSession(
+		goalEnabledAtStartup: boolean,
+		toolNames?: string[],
+		restrictToolNames = false,
+	): Promise<AgentSession> {
 		const authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
@@ -42,6 +46,8 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 			modelRegistry,
 			settings,
 			model: getBundledModel("anthropic", "claude-sonnet-4-5"),
+			toolNames,
+			restrictToolNames,
 			disableExtensionDiscovery: true,
 			skills: [],
 			contextFiles: [],
@@ -62,16 +68,37 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 
 	/** Mirror InteractiveMode.#enterGoalMode's tool operations. */
 	async function enterGoalMode(s: AgentSession): Promise<void> {
-		const previousTools = s.getEnabledToolNames().filter(n => n !== "goal");
+		const previousTools = s.getEnabledToolNames();
 		const state = await s.goalRuntime.createGoal({ objective: "test goal" });
 		await s.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
 		s.setGoalModeState(state);
 	}
 
-	it("exposes the goal tool when goal.enabled is set at startup", async () => {
+	it("exposes the goal tool in a fresh enabled session", async () => {
 		session = await makeSession(true);
-		await enterGoalMode(session);
 		expect(session.getEnabledToolNames()).toContain("goal");
+
+		const writeTool = session.agent.state.tools.find(t => t.name === "write");
+		expect(writeTool).toBeDefined();
+		const result = await writeTool!.execute("call_fresh_goal", {
+			path: "xd://goal",
+			content: JSON.stringify({ op: "get" }),
+		} as never);
+		expect(result.isError ?? false).toBe(false);
+		const text = result.content?.map(c => ("text" in c && typeof c.text === "string" ? c.text : "")).join("\n");
+		expect(text).toContain("No active goal.");
+	});
+
+	it("respects an explicit tool selection that omits goal", async () => {
+		session = await makeSession(true, ["read", "write"]);
+		expect(session.getAllToolInfos().map(tool => tool.name)).toContain("goal");
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+	});
+
+	it("does not register goal in a restricted session", async () => {
+		session = await makeSession(true, ["read", "write"], true);
+		expect(session.getAllToolInfos().map(tool => tool.name)).not.toContain("goal");
+		expect(session.getEnabledToolNames()).not.toContain("goal");
 	});
 
 	it("exposes the goal tool when goal.enabled is turned on after session start", async () => {
@@ -79,6 +106,7 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 		// reload) left the tool registry without `goal`, so entering goal mode
 		// silently dropped the name and `xd://goal` failed with "No such tool".
 		session = await makeSession(false);
+		expect(session.getEnabledToolNames()).not.toContain("goal");
 		Settings.instance.set("goal.enabled", true);
 
 		await enterGoalMode(session);

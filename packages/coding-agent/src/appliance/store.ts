@@ -89,10 +89,22 @@ function parseState(raw: string): ApplianceState {
 	if (!Number.isSafeInteger(parsed.revision) || typeof parsed.revision !== "number" || parsed.revision < 0) {
 		throw new Error("Invalid appliance state revision");
 	}
+	if (parsed.fleet !== undefined && !Array.isArray(parsed.fleet)) throw new Error("Invalid appliance fleet state");
+	const active = parsed.active === undefined ? undefined : parseInstallation(parsed.active);
+	const fleet = parsed.fleet?.map(parseInstallation);
+	const installationIds = new Set<string>();
+	for (const installation of [active, ...(fleet ?? [])]) {
+		if (!installation) continue;
+		if (installationIds.has(installation.installationId)) {
+			throw new Error("Appliance fleet contains a duplicate installation");
+		}
+		installationIds.add(installation.installationId);
+	}
 	return {
 		schemaVersion: APPLIANCE_STATE_SCHEMA_VERSION,
 		revision: parsed.revision,
-		active: parsed.active === undefined ? undefined : parseInstallation(parsed.active),
+		active,
+		fleet,
 		rollbackTarget: parsed.rollbackTarget === undefined ? undefined : parseInstallation(parsed.rollbackTarget),
 		lastInstallReceiptId: optionalString(parsed.lastInstallReceiptId),
 		lastRollbackReceiptId: optionalString(parsed.lastRollbackReceiptId),

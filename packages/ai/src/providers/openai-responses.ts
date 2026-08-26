@@ -60,6 +60,7 @@ import {
 	createNInferRequestIdentity,
 	fetchNInferEndpointIdentity,
 	NINFER_REQUEST_SHAPE_VERSION,
+	stripUnsupportedNInferRequestFields,
 	type NInferEndpointIdentity,
 	type NInferRequestIdentity,
 } from "./ninfer";
@@ -656,6 +657,7 @@ const streamOpenAIResponsesOnce = (
 			let ninferRequestIdentity: NInferRequestIdentity | undefined;
 			let providerPersistenceRollbackState: OpenAIResponsesChainRollbackState | undefined;
 			let providerStateRecovery: "full_replay" | undefined;
+			let ninferFallbackReason: "endpoint_identity_changed" | "stale_previous_response_id" | undefined;
 			if (isOpenAIResponsesStatefulEnabled(options, model) && routingSessionId && providerSessionState) {
 				chainState = getOpenAIResponsesChainState(providerSessionState, model, baseUrl, routingSessionId);
 				if (chainState.pendingPersistence) await chainState.pendingPersistence;
@@ -676,6 +678,8 @@ const streamOpenAIResponsesOnce = (
 						chainState.endpointFingerprint !== ninferEndpointIdentity.fingerprint
 					) {
 						resetOpenAIResponsesChainState(chainState);
+						providerStateRecovery = "full_replay";
+						ninferFallbackReason = "endpoint_identity_changed";
 					}
 					chainState.endpointFingerprint = ninferEndpointIdentity.fingerprint;
 				}
@@ -693,6 +697,9 @@ const streamOpenAIResponsesOnce = (
 				chainState?.canAppend ? chainState.lastParams?.input : undefined,
 			);
 			const { params, trailingScaffoldingItems } = builtParams;
+			if (ninferRequestIdentity) {
+				stripUnsupportedNInferRequestFields(params as unknown as Record<string, unknown>);
+			}
 			let activeParams = params;
 			let activeTrailingScaffoldingItems = trailingScaffoldingItems;
 			const requestReasoningEffortFallbacks = new Map<string, OpenAIReasoningEffortFallback>();
@@ -882,6 +889,11 @@ const streamOpenAIResponsesOnce = (
 								chainState?.canAppend ? chainState.lastParams?.input : undefined,
 							);
 							const fallbackParams = fallbackBuilt.params;
+							if (ninferRequestIdentity) {
+								stripUnsupportedNInferRequestFields(
+									fallbackParams as unknown as Record<string, unknown>,
+								);
+							}
 							if (chainState && !chainState.disabled) fallbackParams.store = true;
 							let fallbackChained: OpenAIResponsesChainedParams =
 								chainState && !chainState.disabled
@@ -924,7 +936,10 @@ const streamOpenAIResponsesOnce = (
 							registerOpenAIResponsesChainStaleFailure(chainState);
 						}
 						providerPersistenceRollbackState = captureOpenAIResponsesChainState(chainState);
-						if (!zdrRejection) providerStateRecovery = "full_replay";
+						if (!zdrRejection) {
+							providerStateRecovery = "full_replay";
+							ninferFallbackReason = "stale_previous_response_id";
+						}
 						sentPreviousResponseId = undefined;
 						const currentBuilt = buildParams(
 							model,
@@ -935,6 +950,11 @@ const streamOpenAIResponsesOnce = (
 							forceDisableStrictTools,
 						);
 						const currentParams = currentBuilt.params;
+						if (ninferRequestIdentity) {
+							stripUnsupportedNInferRequestFields(
+								currentParams as unknown as Record<string, unknown>,
+							);
+						}
 						// Only ZDR forces `store: false` (the org never persists responses). A
 						// non-ZDR stale baseline is transient, so keep storing: the full-context
 						// retry must be chainable next turn, and the consecutive stale-failure
@@ -1135,6 +1155,7 @@ const streamOpenAIResponsesOnce = (
 				chainState?.canAppend &&
 				providerPersistenceRollbackState &&
 				ninferEndpointIdentity &&
+				ninferRequestIdentity &&
 				output.responseId &&
 				chainState.lastParams &&
 				chainState.lastResponseItems
@@ -1142,6 +1163,14 @@ const streamOpenAIResponsesOnce = (
 				const updatedAt = new Date().toISOString();
 				const createdAt = chainState.snapshotCreatedAt ?? updatedAt;
 				chainState.snapshotCreatedAt = createdAt;
+				const requestBaseline = structuredCloneJSON(chainState.lastParams);
+				const baselineRecord = requestBaseline as unknown as Record<string, unknown>;
+				if (typeof baselineRecord.prompt_cache_key === "string") {
+					baselineRecord.prompt_cache_key = ninferRequestIdentity.sessionDigest;
+				}
+				if (typeof baselineRecord.session_id === "string") {
+					baselineRecord.session_id = ninferRequestIdentity.sessionDigest;
+				}
 				try {
 					stageOpenAIResponsesPersistence({
 						providerState: providerSessionState,
@@ -1155,13 +1184,23 @@ const streamOpenAIResponsesOnce = (
 							endpointFingerprint: ninferEndpointIdentity.fingerprint,
 							model: ninferEndpointIdentity.servedModel,
 							lastResponseId: output.responseId,
-							requestBaseline: chainState.lastParams,
+							requestBaseline,
 							priorOutputItems: chainState.lastResponseItems,
 							createdAt,
 							updatedAt,
 							requestShapeVersion: ninferEndpointIdentity.requestShapeVersion,
 							promptCacheBreakpointPolicy: chainState.lastPromptCacheBreakpointPolicy,
 							providerStateRecovery,
+							ninferAffinity: {
+								schemaVersion: 1,
+								sessionSha256: ninferRequestIdentity.sessionDigest,
+								endpointFingerprint: ninferEndpointIdentity.fingerprint,
+								profile: ninferEndpointIdentity.profile,
+								model: ninferEndpointIdentity.servedModel,
+								artifactSha256: ninferEndpointIdentity.artifactSha256,
+								lastSuccessAt: updatedAt,
+								fallbackReason: ninferFallbackReason,
+							},
 						},
 					});
 				} catch (error) {

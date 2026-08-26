@@ -60,7 +60,13 @@ describe("appliance profile registry", () => {
 		expect(profile?.availability).toMatchObject({ installable: false, channel: "beta" });
 		expect(profile?.availability.blockers.join(" ")).toContain("Workstream K");
 		expect(profile?.capabilities).not.toContain("vision");
-		expect(profile?.capabilities).not.toContain("stateful-responses");
+		expect(profile?.capabilities).toEqual([
+			"tools",
+			"reasoning",
+			"thinking-history",
+			"stateful-responses",
+			"durable-checkpoint",
+		]);
 	});
 
 	it("selects supported hardware and explains unsupported hosts", () => {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import type { NInferCheckpointOperation, NInferCheckpointStatus } from "@oh-my-pi/pi-ai/providers/ninfer";
 import { ApplianceLifecycle } from "@oh-my-pi/pi-coding-agent/appliance/lifecycle";
 import { APPLIANCE_PROFILES } from "@oh-my-pi/pi-coding-agent/appliance/registry";
 import {
@@ -134,6 +135,8 @@ class FakePlatform implements AppliancePlatform {
 	stopped: string[] = [];
 	events: string[] = [];
 	onRoutedRequest?: (installation: ApplianceInstallation) => void;
+	failEndpointStatus = false;
+	checkpointCalls: Array<{ operation: NInferCheckpointOperation; sessionSha256: string }> = [];
 
 	async inspectHost(): Promise<ApplianceHostFacts> {
 		return structuredClone(this.host);
@@ -223,15 +226,59 @@ class FakePlatform implements AppliancePlatform {
 	}
 
 	async readEndpointStatus(): Promise<ApplianceEndpointStatus> {
+		if (this.failEndpointStatus) throw new Error("endpoint-status-failed");
 		return {
-			schemaVersion: 1,
-			deploymentProfile: "rtx5090-linux",
+			fingerprint: "9".repeat(64),
+			normalizedBaseUrl: "http://127.0.0.1:8000/v1",
 			servedModel: "q38-ninfer",
-			sessionsResident: 2,
-			queueDepth: 0,
-			cacheUtilization: 0.5,
-			mtpDepth: 3,
-			powerProfile: "performance",
+			profile: "rtx5090-linux",
+			artifactSha256: MODEL_SHA,
+			requestShapeVersion: "omp-openai-responses-ninfer/v1",
+			status: {
+				schemaVersion: 1,
+				artifactType: "ninfer_server_status",
+				upstreamBaseSha: "a".repeat(40),
+				patchStackSha: "b".repeat(40),
+				sourceDirty: false,
+				binarySha256: "c".repeat(64),
+				artifactSha256: MODEL_SHA,
+				configSha256: "d".repeat(64),
+				deploymentProfile: "rtx5090-linux",
+				servedModel: "q38-ninfer",
+				target: "sm_120a",
+				modelId: "qwen3.8-27b",
+				maxContext: 131072,
+				scheduler: {
+					maxConcurrency: 1,
+					maxPendingRequests: 4,
+					running: 1,
+					prefilling: 0,
+					decodeReady: 0,
+					waiting: 0,
+					materializing: 0,
+					capturePending: 0,
+				},
+				cache: { privateCatalogOccupied: 2, privateCatalogCapacity: 4, reusedPromptTokens: 64 },
+				mtp: { rounds: 4, draftedTokens: 12, acceptedTokens: 8, fallbackSteps: 0 },
+			},
+		};
+	}
+
+	async checkpoint(
+		_installation: ApplianceInstallation,
+		_secret: string,
+		operation: NInferCheckpointOperation,
+		sessionSha256: string,
+	): Promise<NInferCheckpointStatus> {
+		this.checkpointCalls.push({ operation, sessionSha256 });
+		return {
+			artifactType: "ninfer_session_checkpoint_status",
+			schemaVersion: 1,
+			sessionSha256,
+			state: operation === "delete" ? "deleted" : "available",
+			bytes: 4096,
+			frontierTokens: 32768,
+			responseRecords: 2,
 		};
 	}
 	qualificationMetrics: ApplianceQuickQualification["metrics"] = {
@@ -317,21 +364,58 @@ describe("appliance lifecycle", () => {
 
 		const receipt = await lifecycle.doctor();
 
-		expect(receipt.details.endpoint).toEqual({
+		expect(receipt.details.endpoint).toMatchObject({
 			reachable: true,
-			schemaVersion: 1,
-			deploymentProfile: "rtx5090-linux",
-			servedModel: "q38-ninfer",
-			sessionsResident: 2,
-			queueDepth: 0,
-			cacheUtilization: 0.5,
-			mtpDepth: 3,
-			powerProfile: "performance",
+			identity: {
+				endpointFingerprint: "9".repeat(64),
+				deploymentProfile: "rtx5090-linux",
+				servedModel: "q38-ninfer",
+				artifactSha256: MODEL_SHA,
+			},
+			maxContext: 131072,
+			scheduler: { running: 1, waiting: 0 },
+			cache: { privateCatalogOccupied: 2, privateCatalogCapacity: 4 },
+			mtp: { acceptedTokens: 8 },
 		});
 		expect(store.state).toEqual(before);
 		expect(store.stateWrites).toBe(0);
 		expect(store.receiptWrites).toBe(0);
 		expect(store.secretWrites).toBe(0);
+	});
+
+	it("marks unreachable authenticated status as blocked or failed without changing routes", async () => {
+		const { lifecycle, store, platform, profile } = harness();
+		store.state = { ...emptyState(), revision: 1, active: installation("active", profile, "secret-active", 8000) };
+		store.secrets.set("secret-active", "test-secret");
+		platform.failEndpointStatus = true;
+		const before = structuredClone(store.state);
+		const doctor = await lifecycle.doctor();
+		const status = await lifecycle.status();
+		expect(doctor).toMatchObject({ status: "blocked", details: { endpoint: { reachable: false } } });
+		expect(status).toMatchObject({ status: "failed", details: { endpoint: { reachable: false } } });
+		expect(store.state).toEqual(before);
+	});
+
+	it("issues checkpoint requests with hashed session identity and redacted receipts", async () => {
+		const checkpointBase = installableProfile();
+		const profile: ApplianceProfile = {
+			...checkpointBase,
+			capabilities: [...checkpointBase.capabilities, "durable-checkpoint"],
+		};
+		const { lifecycle, store, platform } = harness(profile);
+		store.state = { ...emptyState(), revision: 1, active: installation("active", profile, "secret-active", 8000) };
+		store.secrets.set("secret-active", "super-secret-checkpoint");
+		const sessionSha256 = "8".repeat(64);
+		const receipt = await lifecycle.checkpoint("save", sessionSha256);
+		expect(receipt).toMatchObject({
+			action: "checkpoint",
+			status: "ok",
+			details: { operation: "save", sessionSha256, state: "available", bytes: 4096 },
+		});
+		expect(platform.checkpointCalls).toEqual([{ operation: "save", sessionSha256 }]);
+		expect(JSON.stringify(receipt)).not.toContain("super-secret-checkpoint");
+		expect(JSON.stringify(receipt)).not.toContain("baseUrl");
+		expect(store.receiptWrites).toBe(1);
 	});
 
 	it("installs once, switches the route atomically, and remains idempotent", async () => {
@@ -560,9 +644,9 @@ describe("appliance lifecycle", () => {
 		expect(publicOutput).not.toContain("/Users/");
 		expect(firstStatus.details.endpoint).toMatchObject({
 			reachable: true,
-			servedModel: "q38-ninfer",
-			sessionsResident: 2,
-			mtpDepth: 3,
+			identity: { servedModel: "q38-ninfer", endpointFingerprint: "9".repeat(64) },
+			scheduler: { running: 1 },
+			mtp: { acceptedTokens: 8 },
 		});
 	});
 

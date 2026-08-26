@@ -1,4 +1,8 @@
-import type { ProviderStatePersistenceSnapshot, ProviderStateRecovery } from "@oh-my-pi/pi-ai/types";
+import type {
+	NInferSessionAffinity,
+	ProviderStatePersistenceSnapshot,
+	ProviderStateRecovery,
+} from "@oh-my-pi/pi-ai/types";
 import { isRecord, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { CustomEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
@@ -34,6 +38,7 @@ export interface ProviderStateEnvelopeV1 {
 	requestShapeVersion: string;
 	promptCacheBreakpointPolicy?: "latest-stable-message" | "none";
 	provider_state_recovery?: ProviderStateRecovery;
+	ninferAffinity?: NInferSessionAffinity;
 	transcriptBranchSha256: string;
 	sessionIdentitySha256: string;
 }
@@ -78,6 +83,7 @@ export async function prepareProviderStateEnvelope(
 		requestShapeVersion: snapshot.requestShapeVersion,
 		promptCacheBreakpointPolicy: snapshot.promptCacheBreakpointPolicy,
 		provider_state_recovery: snapshot.providerStateRecovery,
+		ninferAffinity: snapshot.ninferAffinity ? { ...snapshot.ninferAffinity } : undefined,
 	};
 }
 
@@ -116,10 +122,50 @@ function parseBlobRef(value: unknown): ProviderStateBlobRef | undefined {
 	return { sha256, bytes, blob };
 }
 
+function parseNInferAffinity(value: unknown): NInferSessionAffinity | undefined {
+	if (value === undefined) return undefined;
+	if (!isRecord(value)) return undefined;
+	if (
+		value.schemaVersion !== 1 ||
+		typeof value.sessionSha256 !== "string" ||
+		!SHA256_PATTERN.test(value.sessionSha256) ||
+		typeof value.endpointFingerprint !== "string" ||
+		!SHA256_PATTERN.test(value.endpointFingerprint) ||
+		typeof value.profile !== "string" ||
+		!value.profile ||
+		value.profile.length > 256 ||
+		typeof value.model !== "string" ||
+		!value.model ||
+		value.model.length > 256 ||
+		typeof value.artifactSha256 !== "string" ||
+		!SHA256_PATTERN.test(value.artifactSha256) ||
+		typeof value.lastSuccessAt !== "string" ||
+		!Number.isFinite(Date.parse(value.lastSuccessAt)) ||
+		(value.fallbackReason !== undefined &&
+			value.fallbackReason !== "endpoint_identity_changed" &&
+			value.fallbackReason !== "stale_previous_response_id" &&
+			value.fallbackReason !== "warm_owner_unavailable")
+	) {
+		return undefined;
+	}
+	return {
+		schemaVersion: 1,
+		sessionSha256: value.sessionSha256,
+		endpointFingerprint: value.endpointFingerprint,
+		profile: value.profile,
+		model: value.model,
+		artifactSha256: value.artifactSha256,
+		lastSuccessAt: value.lastSuccessAt,
+		fallbackReason: value.fallbackReason as NInferSessionAffinity["fallbackReason"],
+	};
+}
+
 function parseEnvelope(value: unknown): ProviderStateEnvelopeV1 | undefined {
 	if (!isRecord(value) || value.schemaVersion !== 1) return undefined;
 	const requestBaselineRef = parseBlobRef(value.requestBaselineRef);
 	const priorOutputItemsRef = parseBlobRef(value.priorOutputItemsRef);
+	const ninferAffinity = parseNInferAffinity(value.ninferAffinity);
+	if (value.ninferAffinity !== undefined && !ninferAffinity) return undefined;
 	if (
 		value.provider !== "openai-responses" ||
 		typeof value.endpointFingerprint !== "string" ||
@@ -145,7 +191,9 @@ function parseEnvelope(value: unknown): ProviderStateEnvelopeV1 | undefined {
 		typeof value.transcriptBranchSha256 !== "string" ||
 		!SHA256_PATTERN.test(value.transcriptBranchSha256) ||
 		typeof value.sessionIdentitySha256 !== "string" ||
-		!SHA256_PATTERN.test(value.sessionIdentitySha256)
+		!SHA256_PATTERN.test(value.sessionIdentitySha256) ||
+		(ninferAffinity !== undefined &&
+			(ninferAffinity.endpointFingerprint !== value.endpointFingerprint || ninferAffinity.model !== value.model))
 	) {
 		return undefined;
 	}
@@ -163,6 +211,7 @@ function parseEnvelope(value: unknown): ProviderStateEnvelopeV1 | undefined {
 		requestShapeVersion: value.requestShapeVersion,
 		promptCacheBreakpointPolicy: value.promptCacheBreakpointPolicy as "latest-stable-message" | "none" | undefined,
 		provider_state_recovery: value.provider_state_recovery as ProviderStateRecovery | undefined,
+		ninferAffinity,
 		transcriptBranchSha256: value.transcriptBranchSha256,
 		sessionIdentitySha256: value.sessionIdentitySha256,
 	};
@@ -188,6 +237,47 @@ function latestProviderStateEntry(branch: readonly SessionEntry[]): { entry: Cus
 	return undefined;
 }
 
+function validatedProviderStateEnvelope(options: {
+	sessionManager: SessionManager;
+	sessionId: string;
+}): ProviderStateEnvelopeV1 | undefined {
+	const branch = options.sessionManager.getBranch();
+	const located = latestProviderStateEntry(branch);
+	if (!located) return undefined;
+	const envelope = parseEnvelope(located.entry.data);
+	if (!envelope || envelope.sessionIdentitySha256 !== sessionIdentityDigest(options.sessionId)) return undefined;
+	const committedIndex = branch.findIndex(entry => entry.id === envelope.lastCommittedTurnId);
+	if (committedIndex < 0 || committedIndex >= located.index || located.entry.parentId !== envelope.lastCommittedTurnId) {
+		return undefined;
+	}
+	const committedEntry = branch[committedIndex];
+	if (
+		committedEntry.type !== "message" ||
+		committedEntry.message.role !== "assistant" ||
+		committedEntry.message.responseId !== envelope.lastResponseId ||
+		digest(branch.slice(0, committedIndex + 1)) !== envelope.transcriptBranchSha256
+	) {
+		return undefined;
+	}
+	for (const entry of branch.slice(located.index + 1)) {
+		if (INVALIDATING_ENTRY_TYPES[entry.type]) return undefined;
+	}
+	return envelope;
+}
+
+/** Load redacted placement affinity without loading provider-owned response blobs. */
+export function loadProviderStateAffinity(options: {
+	sessionManager: SessionManager;
+	sessionId: string;
+}): NInferSessionAffinity | undefined {
+	try {
+		const affinity = validatedProviderStateEnvelope(options)?.ninferAffinity;
+		return affinity ? { ...affinity } : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** Load only a snapshot bound to this exact session branch and request contract. */
 export async function loadProviderStateSnapshot(options: {
 	sessionManager: SessionManager;
@@ -196,37 +286,9 @@ export async function loadProviderStateSnapshot(options: {
 	requestShapeVersion: string;
 }): Promise<ProviderStatePersistenceSnapshot | undefined> {
 	try {
-		const branch = options.sessionManager.getBranch();
-		const located = latestProviderStateEntry(branch);
-		if (!located) return undefined;
-		const envelope = parseEnvelope(located.entry.data);
-		if (!envelope) return undefined;
-		if (
-			envelope.model !== options.model ||
-			envelope.requestShapeVersion !== options.requestShapeVersion ||
-			envelope.sessionIdentitySha256 !== sessionIdentityDigest(options.sessionId)
-		) {
+		const envelope = validatedProviderStateEnvelope(options);
+		if (!envelope || envelope.model !== options.model || envelope.requestShapeVersion !== options.requestShapeVersion) {
 			return undefined;
-		}
-		const committedIndex = branch.findIndex(entry => entry.id === envelope.lastCommittedTurnId);
-		if (
-			committedIndex < 0 ||
-			committedIndex >= located.index ||
-			located.entry.parentId !== envelope.lastCommittedTurnId
-		) {
-			return undefined;
-		}
-		const committedEntry = branch[committedIndex];
-		if (
-			committedEntry.type !== "message" ||
-			committedEntry.message.role !== "assistant" ||
-			committedEntry.message.responseId !== envelope.lastResponseId ||
-			digest(branch.slice(0, committedIndex + 1)) !== envelope.transcriptBranchSha256
-		) {
-			return undefined;
-		}
-		for (const entry of branch.slice(located.index + 1)) {
-			if (INVALIDATING_ENTRY_TYPES[entry.type]) return undefined;
 		}
 		const [requestBaseline, priorOutputItems] = await Promise.all([
 			readJsonBlob(options.sessionManager, envelope.requestBaselineRef),
@@ -246,6 +308,7 @@ export async function loadProviderStateSnapshot(options: {
 			requestShapeVersion: envelope.requestShapeVersion,
 			promptCacheBreakpointPolicy: envelope.promptCacheBreakpointPolicy,
 			providerStateRecovery: envelope.provider_state_recovery,
+			ninferAffinity: envelope.ninferAffinity ? { ...envelope.ninferAffinity } : undefined,
 		};
 	} catch {
 		return undefined;

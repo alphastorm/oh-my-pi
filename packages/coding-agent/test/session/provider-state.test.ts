@@ -3,6 +3,7 @@ import type { AssistantMessage, ProviderStatePersistenceSnapshot } from "@oh-my-
 import {
 	finalizeProviderStateEnvelope,
 	loadProviderStateSnapshot,
+	loadProviderStateAffinity,
 	PROVIDER_STATE_CUSTOM_TYPE,
 	type ProviderStateEnvelopeV1,
 	prepareProviderStateEnvelope,
@@ -52,6 +53,15 @@ function snapshot(responseId: string): ProviderStatePersistenceSnapshot {
 		createdAt: "2026-08-26T00:00:00.000Z",
 		updatedAt: "2026-08-26T00:00:01.000Z",
 		requestShapeVersion: REQUEST_SHAPE_VERSION,
+		ninferAffinity: {
+			schemaVersion: 1,
+			sessionSha256: "b".repeat(64),
+			endpointFingerprint: "a".repeat(64),
+			profile: "rtx5090-linux",
+			model: MODEL,
+			artifactSha256: "c".repeat(64),
+			lastSuccessAt: "2026-08-26T00:00:01.000Z",
+		},
 	};
 }
 
@@ -103,13 +113,17 @@ describe("provider state journal", () => {
 
 	it("restores content-addressed state from the exact durable session branch", async () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.join("sessions"));
-		const { snapshot: expected } = await publishState(manager);
+		const { envelope, snapshot: expected } = await publishState(manager);
+		expect(JSON.stringify(envelope)).not.toContain(manager.getSessionId());
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("session file was not created");
 		await manager.close();
 
 		const reopened = await SessionManager.open(sessionFile, tempDir.path());
 		expect(await load(reopened)).toEqual(expected);
+		expect(
+			loadProviderStateAffinity({ sessionManager: reopened, sessionId: reopened.getSessionId() }),
+		).toEqual(expected.ninferAffinity);
 		await reopened.close();
 	});
 

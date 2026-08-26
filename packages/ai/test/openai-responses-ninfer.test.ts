@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { restoreOpenAIResponsesProviderState, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { NInferCheckpointError, requestNInferCheckpoint } from "@oh-my-pi/pi-ai/providers/ninfer";
 import type {
 	Context,
 	FetchImpl,
@@ -97,17 +98,40 @@ function createToolCallSse(responseId: string, callId: string): Response {
 
 function createStatusFixture(): Record<string, unknown> {
 	return {
+		artifact_type: "ninfer_server_status",
 		schema_version: 1,
-		server_instance_id: "ninfer-5090-1",
-		upstream_base_sha: "a".repeat(40),
-		patch_stack_sha: "b".repeat(64),
-		source_dirty: false,
-		binary_sha256: "c".repeat(64),
-		artifact_sha256: "d".repeat(64),
-		config_sha256: "e".repeat(64),
-		deployment_profile: "rtx5090-linux",
-		served_model: "q38-ninfer",
+		status: "ok",
+		identity: {
+			upstream_base_sha: "a".repeat(40),
+			patch_stack_sha: "b".repeat(40),
+			source_dirty: false,
+			binary_sha256: "c".repeat(64),
+			model_artifact_sha256: "d".repeat(64),
+			config_sha256: "e".repeat(64),
+			deployment_profile: "rtx5090-linux",
+			target: "sm_120a",
+			model_id: "qwen3.8-27b",
+		},
+		runtime: { public_model_id: "q38-ninfer", max_context: 131072 },
+		scheduler: {
+			max_concurrency: 1,
+			max_pending_requests: 4,
+			running: 0,
+			prefilling: 0,
+			decode_ready: 0,
+			waiting: 0,
+			materializing: 0,
+			capture_pending: 0,
+		},
+		cache: { private_catalog: { occupied: 1, capacity: 8 }, reused_prompt_tokens: 16 },
+		mtp: { rounds: 2, drafted_tokens: 6, accepted_tokens: 4, fallback_steps: 0 },
 	};
+}
+
+function statusSection(status: Record<string, unknown>, key: "identity" | "runtime"): Record<string, unknown> {
+	const value = status[key];
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`missing status ${key}`);
+	return value as Record<string, unknown>;
 }
 
 interface NInferFetchHarness {
@@ -217,6 +241,16 @@ describe("NInfer stateful OpenAI Responses", () => {
 		expect(firstResponse.stopReason).toBe("stop");
 		const firstUpdate = requirePendingPersistence(initialState, firstResponse.responseId);
 		expect(JSON.stringify(firstUpdate.snapshot.requestBaseline)).not.toContain("ninfer_session");
+		expect(firstUpdate.snapshot.ninferAffinity).toMatchObject({
+			schemaVersion: 1,
+			profile: "rtx5090-linux",
+			model: "q38-ninfer",
+			artifactSha256: "d".repeat(64),
+		});
+		expect(firstUpdate.snapshot.ninferAffinity?.sessionSha256).toMatch(/^[0-9a-f]{64}$/);
+		expect(JSON.stringify(firstUpdate.snapshot)).not.toContain("persisted-ninfer-session");
+		expect(JSON.stringify(firstUpdate.snapshot)).not.toContain("127.0.0.1");
+		expect(JSON.stringify(firstUpdate.snapshot)).not.toContain("test-key");
 		firstUpdate.commit();
 
 		const restoredState = new Map<string, ProviderSessionState>();
@@ -237,7 +271,7 @@ describe("NInfer stateful OpenAI Responses", () => {
 		expect(secondResponse.stopReason).toBe("stop");
 		requirePendingPersistence(restoredState, secondResponse.responseId).commit();
 
-		harness.status.config_sha256 = "f".repeat(64);
+		statusSection(harness.status, "identity").config_sha256 = "f".repeat(64);
 		const thirdResponse = await streamOpenAIResponses(
 			model,
 			{
@@ -258,6 +292,12 @@ describe("NInfer stateful OpenAI Responses", () => {
 		expect(harness.statusHeaders).toHaveLength(3);
 		for (const headers of harness.statusHeaders) expect(headers.get("authorization")).toBe("Bearer test-key");
 		expect(harness.postBodies).toHaveLength(3);
+		for (const body of harness.postBodies) {
+			expect(body.include).toBeUndefined();
+			expect(body.prompt_cache_key).toBeUndefined();
+			expect(body.session_id).toBeUndefined();
+			expect(body.reasoning).toEqual({ effort: "low" });
+		}
 		expect(harness.postBodies[0]?.model).toBe("q38-ninfer");
 		expect(harness.postBodies[0]?.previous_response_id).toBeUndefined();
 		expect(harness.postBodies[1]?.previous_response_id).toBe("resp_1");
@@ -490,7 +530,7 @@ describe("NInfer stateful OpenAI Responses", () => {
 
 	it("fails closed when authenticated status serves a different model", async () => {
 		const harness = createNInferFetchHarness();
-		harness.status.served_model = "unexpected-model";
+		statusSection(harness.status, "runtime").public_model_id = "unexpected-model";
 		const response = await streamOpenAIResponses(
 			model,
 			{ messages: [firstUser] },
@@ -517,5 +557,74 @@ describe("NInfer stateful OpenAI Responses", () => {
 		expect(response.stopReason).toBe("error");
 		expect(response.errorMessage).toContain("authentication is required");
 		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
+
+describe("NInfer durable checkpoint client", () => {
+	it("uses the authenticated operation-specific checkpoint contract", async () => {
+		const sessionSha256 = "a".repeat(64);
+		const calls: Array<{
+			url: string;
+			method: string;
+			authorization: string | null;
+			contentType: string | null;
+			body: RequestInit["body"];
+		}> = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const method = init?.method ?? "GET";
+			calls.push({
+				url: String(input),
+				method,
+				authorization: new Headers(init?.headers).get("authorization"),
+				contentType: new Headers(init?.headers).get("content-type"),
+				body: init?.body,
+			});
+			return Response.json({
+				artifact_type: "ninfer_session_checkpoint_status",
+				schema_version: 1,
+				state: method === "DELETE" ? "deleted" : "available",
+				generation: "gen-7",
+				bytes: 4096,
+				frontier_tokens: 32768,
+				restored_tokens: 30000,
+				response_records: 2,
+			});
+		}) as FetchImpl;
+		for (const operation of ["status", "save", "delete"] as const) {
+			await requestNInferCheckpoint({
+				operation,
+				sessionSha256,
+				baseUrl: "http://127.0.0.1:18080/v1",
+				apiKey: "checkpoint-key",
+				fetch: fetchMock,
+			});
+		}
+		expect(calls.map(call => call.method)).toEqual(["GET", "POST", "DELETE"]);
+		expect(calls.map(call => call.url)).toEqual([
+			`http://127.0.0.1:18080/v1/ninfer/checkpoints/${sessionSha256}/status`,
+			"http://127.0.0.1:18080/v1/ninfer/checkpoints",
+			`http://127.0.0.1:18080/v1/ninfer/checkpoints/${sessionSha256}`,
+		]);
+		for (const call of calls) {
+			expect(call.authorization).toBe("Bearer checkpoint-key");
+		}
+		expect(calls[0]).toMatchObject({ contentType: null, body: undefined });
+		expect(calls[1]).toMatchObject({
+			contentType: "application/json",
+			body: JSON.stringify({ session_sha256: sessionSha256 }),
+		});
+		expect(calls[2]).toMatchObject({ contentType: null, body: undefined });
+	});
+
+	it("classifies a save with no complete response as unavailable", async () => {
+		const error = await requestNInferCheckpoint({
+			operation: "save",
+			sessionSha256: "b".repeat(64),
+			baseUrl: "http://127.0.0.1:18080/v1",
+			apiKey: "checkpoint-key",
+			fetch: vi.fn(async () => Response.json({ code: "checkpoint_unavailable" }, { status: 409 })) as FetchImpl,
+		}).catch(candidate => candidate);
+		expect(error).toBeInstanceOf(NInferCheckpointError);
+		expect(error).toMatchObject({ kind: "unavailable", status: 409 });
 	});
 });

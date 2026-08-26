@@ -585,6 +585,8 @@ describe("InteractiveMode goal mode integration", () => {
 	});
 
 	it("returns the completion report from the goal tool and exits goal mode before the next turn rebuild", async () => {
+		await harness.session.setActiveToolsByName(["read", "goal"]);
+		expect(harness.session.getEnabledToolNames()).toContain("goal");
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		await harness.mode.handleGoalModeCommand("budget 50");
 		const appendCustomEntry = vi.spyOn(harness.session.sessionManager, "appendCustomEntry");
@@ -619,7 +621,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.mode.goalModeEnabled).toBe(false);
 		expect(harness.mode.goalModePaused).toBe(false);
 		expect(harness.session.getGoalModeState()).toBeUndefined();
-		expect(await toolNamesFor(harness)).not.toContain("goal");
+		expect(await toolNamesFor(harness)).toContain("goal");
 		expect(appendCustomEntry).toHaveBeenCalledWith(
 			"goal-completed",
 			expect.objectContaining({

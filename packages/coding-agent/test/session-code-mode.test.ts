@@ -613,7 +613,10 @@ describe("Code Mode session startup", () => {
 			agentDir: registryDir,
 			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "providers.openai-codex.codeMode": "auto" }),
+			settings: Settings.isolated({
+				"providers.openai-codex.codeMode": "auto",
+				"goal.enabled": true,
+			}),
 			model: codeModel,
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -629,14 +632,18 @@ describe("Code Mode session startup", () => {
 		expect(active).toContain("eval");
 		expect(active).not.toContain("read");
 		expect(active).not.toContain("bash");
+		expect(active).not.toContain("goal");
 		// Demoted tools stay enabled and bridge-reachable instead of vanishing.
 		expect(session.getEnabledToolNames()).toContain("read");
 		expect(session.getToolForEvalBridge("read")?.name).toBe("read");
+		expect(session.getEnabledToolNames()).toContain("goal");
+		expect(session.getToolForEvalBridge("goal")?.name).toBe("goal");
 		// The namespaces snapshot feeding `tool_namespaces_info` exists before
 		// any turn runs.
 		const info = session.codeModeNamespacesInfo as ToolNamespacesInfo;
 		expect(info.functions.functions.eval.direct).toBe(true);
 		expect(info.functions.functions.read.direct).toBe(false);
+		expect(info.functions.functions.goal.direct).toBe(false);
 	});
 
 	test("fresh session with code mode off keeps the direct surface and no namespaces info", async () => {

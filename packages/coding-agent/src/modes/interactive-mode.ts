@@ -3095,11 +3095,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				preserveActiveGoal: options?.preserveActiveGoal,
 			});
 			this.goalModeEnabled = restored?.enabled === true;
-			this.goalModePaused = restored?.enabled !== true && restored?.goal.status === "paused";
-			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
-			// Re-add it now so the agent can call resume, complete, or drop on this goal.
+			this.goalModePaused = restored?.enabled !== true && restored?.goal?.status === "paused";
 			if (restored?.goal) {
-				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
+				const previousTools = this.session.getEnabledToolNames();
 				this.#goalModePreviousTools = previousTools;
 				await this.session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
 			}
@@ -3355,7 +3353,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return;
 		}
-		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
+		const previousTools = this.session.getEnabledToolNames();
 		const goalTools = [...new Set([...previousTools, "goal"])];
 		this.#goalModePreviousTools = previousTools;
 		this.goalModePaused = false;
@@ -4169,12 +4167,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				return false;
 			}
 
-			// Expose the goal tool for the interview so the agent can finish by
-			// calling `goal create`. Record the pre-interview toolset first: the
-			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
-			// eventual goal exit restores this set (dropping the goal tool again).
+			// Preserve the exact pre-interview toolset so goal exposure survives exit
+			// when it was already available to the fresh session.
 			const enabledTools = this.session.getEnabledToolNames();
-			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
+			this.#goalModePreviousTools = enabledTools;
 			if (!enabledTools.includes("goal")) {
 				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
 			}

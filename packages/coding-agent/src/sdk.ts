@@ -3291,7 +3291,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return tool?.defaultInactive === true || tool?.hidden === true;
 			}),
 		);
-		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal");
+		const requestedActiveToolNames = normalizedRequested;
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)
 			: undefined;

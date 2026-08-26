@@ -32,6 +32,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.authBrokerHelp,
 	},
 	{
+		name: "appliance",
+		load: () => import("./commands/appliance").then(m => m.default),
+		help: commandHelp.applianceHelp,
+	},
+	{
 		name: "auth-gateway",
 		load: () => import("./commands/auth-gateway").then(m => m.default),
 		help: commandHelp.authGatewayHelp,

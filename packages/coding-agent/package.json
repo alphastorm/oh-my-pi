@@ -107,6 +107,10 @@
       "types": "./src/*.ts",
       "import": "./src/*.ts"
     },
+    "./appliance/*": {
+      "types": "./src/appliance/*.ts",
+      "import": "./src/appliance/*.ts"
+    },
     "./async": {
       "types": "./src/async/index.ts",
       "import": "./src/async/index.ts"

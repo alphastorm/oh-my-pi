@@ -5,6 +5,9 @@ export const acpHelp = {
 } satisfies CommandMetadata;
 
 export const agentsHelp = { description: "Manage bundled task agents" } satisfies CommandMetadata;
+export const applianceHelp = {
+	description: "Inspect and manage a transactional local inference appliance",
+} satisfies CommandMetadata;
 
 export const authBrokerHelp = {
 	description: "Manage the omp auth-broker (credential vault)",

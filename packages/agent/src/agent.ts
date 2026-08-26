@@ -20,8 +20,8 @@ import {
 	type TextContent,
 	type ThinkingBudgets,
 	type ToolChoice,
-	type TransportAttemptEvent,
 	type ToolResultMessage,
+	type TransportAttemptEvent,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";

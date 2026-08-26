@@ -1475,10 +1475,15 @@ describe("runGcCommand cold-session archive", () => {
 		db.prepare("INSERT INTO messages (session_file) VALUES (?)").run(session);
 		db.close();
 		const sessionMoved = (async () => {
-			for await (const event of fs.watch(path.dirname(session))) {
-				if (event.filename === path.basename(session)) return true;
+			for (let attempt = 0; attempt < 500; attempt++) {
+				try {
+					await fs.stat(session);
+				} catch {
+					return true;
+				}
+				await Bun.sleep(10);
 			}
-			return false;
+			throw new Error("GC did not archive the session while the stats lock was held");
 		})();
 
 		let gcPromise: Promise<GcResult> | undefined;

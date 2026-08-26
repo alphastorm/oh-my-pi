@@ -11,10 +11,10 @@ import { type Type, type } from "@oh-my-pi/omptype";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	canonicalSnapshotKey,
+	EditTool,
 	type ExecuteHashlineSingleOptions,
 	executeHashlineSingle,
 	getFileSnapshotStore as getFileReadCache,
-	EditTool,
 	HashlineFilesystem,
 	hashlineEditParamsSchema,
 } from "@oh-my-pi/pi-coding-agent/edit";

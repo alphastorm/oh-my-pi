@@ -22,6 +22,28 @@
   Fork of <a href="https://github.com/badlogic/pi-mono">Pi</a> by <a href="https://github.com/mariozechner">@mariozechner</a> 
 </p>
 
+## Keep long coding sessions private and warm
+
+OMP's local Qwen3.8 appliance is built around the outcome that matters: the authoritative coding transcript stays in OMP, while authenticated NInfer state on GPUs you control accelerates continuation. Warm sessions remain sticky to the endpoint that owns them; fresh foreground and background work can use a qualified RTX 5090/4090 fleet without making provider state the conversation.
+
+- **Private by construction:** raw session IDs, prompts, outputs, secrets, URLs, and private host details stay out of ordinary receipts and affinity state.
+- **Deterministic recovery:** stale, absent, corrupt, incompatible, or endpoint-mismatched acceleration state produces one full transcript replay.
+- **No cloud escape hatch:** appliance failure never switches provider, model, or endpoint class. Optional cold fallback means another compatible authenticated **local** appliance only.
+- **Transactional operations:** checksum-pinned install, isolated qualification, routed proof, and proven rollback leave the incumbent available until the replacement works.
+
+> [!IMPORTANT]
+> Both public appliance profiles are intentionally non-installable today. RTX 5090 source provenance is remediated, but its image build/live receipt is held. RTX 4090 K3 stopped at the first restart red; the root fix and remediated MTP0 package candidate are locally verified but not live-qualified, and MTP3/K5 did not run. OMP and NInfer implement the D6 source contract, but the exact `sm_120a` binary/live restart proof is blocked on the held RTX 5090 lane. No current blocker implies an unpublished URL, artifact, or result.
+
+Inspect the truthful state without changing routes or services:
+
+```sh
+omp appliance doctor --json
+omp appliance plan qwen3.8 --gpu auto --json
+omp appliance status --json
+```
+
+Start with the [local appliance quickstart](docs/quickstart.md), then read [architecture](docs/architecture.md), [security](docs/security.md), [qualification](docs/qualification.md), [lifecycle](docs/appliance-lifecycle.md), [session continuation](docs/session-continuation.md), [RTX 5090](docs/rtx5090.md), [RTX 4090](docs/rtx4090.md), and [troubleshooting](docs/troubleshooting.md).
+
 The most capable agent surface that ships. Continuously tuned by real-world use — complete out of the box, open all the way down.
 
 **60+** providers · **31** built-in tools · **14** lsp ops · **28** dap ops · **~80k** lines of Rust core.

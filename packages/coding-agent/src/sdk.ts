@@ -23,10 +23,12 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import { NINFER_REQUEST_SHAPE_VERSION } from "@oh-my-pi/pi-ai/providers/ninfer";
 import {
 	getOpenAICodexTransportDetails,
 	prewarmOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { restoreOpenAIResponsesProviderState } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import {
@@ -162,6 +164,7 @@ import {
 	wrapSteeringForModel,
 } from "./session/messages";
 import { clampProviderContextImages } from "./session/provider-image-budget";
+import { loadProviderStateSnapshot } from "./session/provider-state";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
@@ -253,6 +256,11 @@ type McpNotificationEntry = {
 type LateDiagnosticsDetails = {
 	files: Array<{ path: string; summary: string; errored: boolean; messages: string[] }>;
 };
+function isNInferStatefulResponsesModel(model: Model): model is Model<"openai-responses"> {
+	return (
+		model.api === "openai-responses" && (model as Model<"openai-responses">).compat?.ninferStatefulResponses === true
+	);
+}
 
 function buildLateDiagnosticsBatchMessage(
 	entries: DeferredDiagnosticsEntry[],
@@ -3523,6 +3531,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					supportsExternalThinking(streamModel);
 				return settingsAwareStreamFn(streamModel, context, {
 					...streamOptions,
+					providerStatePersistence:
+						isNInferStatefulResponsesModel(streamModel) && sessionManager.getSessionFile() !== undefined,
 					anthropicCacheRefresh: true,
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
 					...(codeModeState.namespacesInfo === undefined
@@ -3764,6 +3774,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorMcpResources: cursorMcpResources,
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
+		if (hasExistingSession && model && isNInferStatefulResponsesModel(model)) {
+			const snapshot = await loadProviderStateSnapshot({
+				sessionManager,
+				sessionId: session.sessionId,
+				model: model.requestModelId ?? model.id,
+				requestShapeVersion: NINFER_REQUEST_SHAPE_VERSION,
+			});
+			if (snapshot) {
+				restoreOpenAIResponsesProviderState({
+					providerSessionState: session.providerSessionState,
+					model,
+					sessionId: session.sessionId,
+					snapshot,
+				});
+			}
+		}
 		hasSession = true;
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the

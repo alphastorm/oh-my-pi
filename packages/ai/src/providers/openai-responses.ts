@@ -11,6 +11,8 @@ import type {
 	Model,
 	OpenAICompat,
 	ProviderSessionState,
+	ProviderStatePersistenceSnapshot,
+	ProviderStatePersistenceUpdate,
 	RawSseEvent,
 	ServiceTier,
 	StreamFunction,
@@ -51,6 +53,14 @@ import {
 	type OpenAIResponsesToolChoice,
 } from "../utils/tool-choice";
 import { compactGrammarDefinition } from "./grammar";
+import {
+	applyNInferRequestIdentity,
+	createNInferRequestIdentity,
+	fetchNInferEndpointIdentity,
+	NINFER_REQUEST_SHAPE_VERSION,
+	type NInferEndpointIdentity,
+	type NInferRequestIdentity,
+} from "./ninfer";
 import {
 	applyOpenAIReasoningEffortFallback,
 	clearOpenAIReasoningEffortFallbackState,
@@ -200,15 +210,13 @@ interface OpenAIResponsesProviderSessionState
 		OpenAIStrictToolsState,
 		OpenAIReasoningEffortFallbackState {
 	nativeHistoryReplayWarmed: boolean;
-	/** Stateful `previous_response_id` chain baselines, keyed by baseUrl/model/session. */
+	/** Stateful previous_response_id chain baselines, keyed by baseUrl/model/session. */
 	chains: Map<string, OpenAIResponsesChainState>;
+	pendingPersistence: Map<string, ProviderStatePersistenceUpdate>;
 }
 
 interface OpenAIResponsesChainState {
-	/**
-	 * Wire params of the last successful turn; never carries
-	 * `previous_response_id`.
-	 */
+	/** Wire params of the last successful turn; never carries previous_response_id. */
 	lastParams?: OpenAIResponsesSamplingParams;
 	lastPromptCacheBreakpointPolicy?: "latest-stable-message" | "none";
 	lastResponseId?: string;
@@ -219,6 +227,54 @@ interface OpenAIResponsesChainState {
 	staleFailures: number;
 	/** Set once chaining is judged unsupported for this session (circuit breaker). */
 	disabled: boolean;
+	endpointFingerprint?: string;
+	snapshotCreatedAt?: string;
+	pendingPersistence?: Promise<void>;
+}
+
+interface OpenAIResponsesChainRollbackState {
+	lastParams?: OpenAIResponsesSamplingParams;
+	lastPromptCacheBreakpointPolicy?: "latest-stable-message" | "none";
+	lastResponseId?: string;
+	lastResponseItems?: ResponseInput;
+	canAppend: boolean;
+	staleFailures: number;
+	disabled: boolean;
+	endpointFingerprint?: string;
+	snapshotCreatedAt?: string;
+}
+
+function captureOpenAIResponsesChainState(state: OpenAIResponsesChainState): OpenAIResponsesChainRollbackState {
+	return {
+		lastParams: state.lastParams,
+		lastPromptCacheBreakpointPolicy: state.lastPromptCacheBreakpointPolicy,
+		lastResponseId: state.lastResponseId,
+		lastResponseItems: state.lastResponseItems,
+		canAppend: state.canAppend,
+		staleFailures: state.staleFailures,
+		disabled: state.disabled,
+		endpointFingerprint: state.endpointFingerprint,
+		snapshotCreatedAt: state.snapshotCreatedAt,
+	};
+}
+
+function restoreOpenAIResponsesChainState(
+	state: OpenAIResponsesChainState,
+	snapshot: OpenAIResponsesChainRollbackState,
+): void {
+	state.lastParams = snapshot.lastParams;
+	state.lastPromptCacheBreakpointPolicy = snapshot.lastPromptCacheBreakpointPolicy;
+	state.lastResponseId = snapshot.lastResponseId;
+	state.lastResponseItems = snapshot.lastResponseItems;
+	state.canAppend = snapshot.canAppend;
+	state.staleFailures = snapshot.staleFailures;
+	state.disabled = snapshot.disabled;
+	state.endpointFingerprint = snapshot.endpointFingerprint;
+	state.snapshotCreatedAt = snapshot.snapshotCreatedAt;
+}
+
+function providerPersistenceKey(provider: string, model: string, responseId: string): string {
+	return `${provider}\u0000${model}\u0000${responseId}`;
 }
 
 function createOpenAIResponsesProviderSessionState(): OpenAIResponsesProviderSessionState {
@@ -229,9 +285,16 @@ function createOpenAIResponsesProviderSessionState(): OpenAIResponsesProviderSes
 		...reasoningEffortFallbackState,
 		nativeHistoryReplayWarmed: false,
 		chains: new Map(),
+		pendingPersistence: new Map(),
+		takePendingPersistence: selection =>
+			state.pendingPersistence.get(
+				providerPersistenceKey(selection.provider, selection.model, selection.responseId),
+			),
 		close: () => {
+			for (const update of [...state.pendingPersistence.values()]) update.rollback();
 			state.nativeHistoryReplayWarmed = false;
 			state.chains.clear();
+			state.pendingPersistence.clear();
 			clearOpenAIStrictToolsState(state);
 			clearOpenAIReasoningEffortFallbackState(state);
 		},
@@ -244,7 +307,7 @@ function getOpenAIResponsesProviderSessionState(
 	providerSessionState: Map<string, ProviderSessionState> | undefined,
 ): OpenAIResponsesProviderSessionState | undefined {
 	if (!providerSessionState) return undefined;
-	const key = `${OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX}${model.provider}`;
+	const key = OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX + model.provider;
 	const existing = providerSessionState.get(key) as OpenAIResponsesProviderSessionState | undefined;
 	if (existing) return existing;
 	const created = createOpenAIResponsesProviderSessionState();
@@ -253,16 +316,23 @@ function getOpenAIResponsesProviderSessionState(
 }
 
 function isOpenAIResponsesStatefulEnabled(
+	model: Model<"openai-responses">,
 	options: OpenAIResponsesOptions | undefined,
 	baseUrl: string | undefined,
 ): boolean {
 	if (options?.statefulResponses === false) return false;
+	if (model.compat.ninferStatefulResponses) return true;
 	if (options?.statefulResponses === true) return true;
-	// Default ON only against the official OpenAI API: chaining forces
-	// `store: true`, and third-party /v1/responses proxies routinely ignore or
-	// reject `previous_response_id`. An unset baseUrl means the default
-	// endpoint (api.openai.com).
+	// Default ON only against the official OpenAI API: chaining forces store: true.
 	return $flag("PI_OPENAI_STATEFUL", !baseUrl || hostMatchesUrl(baseUrl, "openai"));
+}
+
+function openAIResponsesChainKey(
+	model: Model<"openai-responses">,
+	resolvedBaseUrl: string | undefined,
+	sessionId: string,
+): string {
+	return `${resolvedBaseUrl ?? model.baseUrl ?? ""}\u0000${model.id}\u0000${sessionId}`;
 }
 
 function getOpenAIResponsesChainState(
@@ -271,7 +341,7 @@ function getOpenAIResponsesChainState(
 	resolvedBaseUrl: string | undefined,
 	sessionId: string,
 ): OpenAIResponsesChainState {
-	const key = `${resolvedBaseUrl ?? model.baseUrl ?? ""}\u0000${model.id}\u0000${sessionId}`;
+	const key = openAIResponsesChainKey(model, resolvedBaseUrl, sessionId);
 	const existing = providerSessionState.chains.get(key);
 	if (existing) return existing;
 	const created: OpenAIResponsesChainState = { canAppend: false, staleFailures: 0, disabled: false };
@@ -285,6 +355,46 @@ function resetOpenAIResponsesChainState(state: OpenAIResponsesChainState): void 
 	state.lastResponseId = undefined;
 	state.lastResponseItems = undefined;
 	state.lastPromptCacheBreakpointPolicy = undefined;
+	state.snapshotCreatedAt = undefined;
+}
+
+export function restoreOpenAIResponsesProviderState(options: {
+	model: Model<"openai-responses">;
+	providerSessionState: Map<string, ProviderSessionState>;
+	sessionId: string;
+	snapshot: ProviderStatePersistenceSnapshot;
+}): boolean {
+	const { model, snapshot } = options;
+	const requestBaseline = snapshot.requestBaseline;
+	if (
+		!model.compat.ninferStatefulResponses ||
+		snapshot.schemaVersion !== 1 ||
+		snapshot.provider !== "openai-responses" ||
+		snapshot.model !== (model.requestModelId ?? model.id) ||
+		snapshot.requestShapeVersion !== NINFER_REQUEST_SHAPE_VERSION ||
+		!/^[0-9a-f]{64}$/.test(snapshot.endpointFingerprint) ||
+		!snapshot.lastResponseId ||
+		!requestBaseline ||
+		typeof requestBaseline !== "object" ||
+		Array.isArray(requestBaseline) ||
+		!Array.isArray(snapshot.priorOutputItems)
+	) {
+		return false;
+	}
+	const state = getOpenAIResponsesProviderSessionState(model, options.providerSessionState);
+	if (!state) return false;
+	state.nativeHistoryReplayWarmed = true;
+	const chain = getOpenAIResponsesChainState(state, model, model.baseUrl, options.sessionId);
+	chain.lastParams = structuredCloneJSON(requestBaseline as OpenAIResponsesSamplingParams);
+	chain.lastPromptCacheBreakpointPolicy = snapshot.promptCacheBreakpointPolicy;
+	chain.lastResponseId = snapshot.lastResponseId;
+	chain.lastResponseItems = structuredCloneJSON(snapshot.priorOutputItems as ResponseInput);
+	chain.canAppend = true;
+	chain.staleFailures = 0;
+	chain.disabled = false;
+	chain.endpointFingerprint = snapshot.endpointFingerprint;
+	chain.snapshotCreatedAt = snapshot.createdAt;
+	return true;
 }
 
 interface OpenAIResponsesChainedParams {
@@ -332,23 +442,28 @@ function buildOpenAIResponsesChainedParams(
 
 function isOpenAIResponsesStalePreviousResponseError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
-	if ((error as { code?: string }).code === "previous_response_not_found") return true;
-	// "unsupported" covers endpoints that reject the parameter outright
-	// (e.g. "Unsupported parameter: previous_response_id").
+	const classified = error as Error & { code?: unknown; param?: unknown };
+	if (
+		classified.code === "previous_response_not_found" ||
+		classified.code === "previous_response_expired" ||
+		classified.code === "stale_previous_response_id"
+	) {
+		return true;
+	}
 	return (
-		/previous[ _]?response/i.test(error.message) &&
-		/not[ _]?found|invalid|expired|stale|unsupported/i.test(error.message)
+		/previous[ _]?response/i.test(classified.message) &&
+		/not[ _]?found|expired|stale/i.test(classified.message) &&
+		(classified.param === undefined || classified.param === "previous_response_id")
 	);
 }
 
-function registerOpenAIResponsesChainStaleFailure(chain: OpenAIResponsesChainState, error: unknown): void {
+function registerOpenAIResponsesChainStaleFailure(chain: OpenAIResponsesChainState): void {
 	resetOpenAIResponsesChainState(chain);
 	chain.staleFailures += 1;
 	if (chain.staleFailures >= OPENAI_RESPONSES_CHAIN_STALE_FAILURE_LIMIT) {
 		chain.disabled = true;
 	}
 	logger.debug("OpenAI responses previous_response_id rejected; falling back to full context", {
-		error: error instanceof Error ? error.message : String(error),
 		consecutiveFailures: chain.staleFailures,
 		disabled: chain.disabled,
 	});
@@ -358,13 +473,11 @@ function registerOpenAIResponsesChainStaleFailure(chain: OpenAIResponsesChainSta
  * One-shot ZDR signal: the org will never resolve a stored response, so skip
  * the staleFailures counter and disable chaining immediately for this session.
  */
-function markOpenAIResponsesChainZeroDataRetention(chain: OpenAIResponsesChainState, error: unknown): void {
+function markOpenAIResponsesChainZeroDataRetention(chain: OpenAIResponsesChainState): void {
 	resetOpenAIResponsesChainState(chain);
 	chain.disabled = true;
 	chain.staleFailures = OPENAI_RESPONSES_CHAIN_STALE_FAILURE_LIMIT;
-	logger.debug("OpenAI responses chaining disabled (Zero Data Retention)", {
-		error: error instanceof Error ? error.message : String(error),
-	});
+	logger.debug("OpenAI responses chaining disabled (Zero Data Retention)");
 }
 
 type OpenRouterAnthropicCacheControl = { type: "ephemeral"; ttl?: "1h" };
@@ -385,6 +498,43 @@ type OpenAIResponsesSamplingParams = ResponseCreateParamsStreaming & {
 	cache_ttl?: "5m" | "1h";
 };
 
+function stageOpenAIResponsesPersistence(options: {
+	providerState: OpenAIResponsesProviderSessionState;
+	chainState: OpenAIResponsesChainState;
+	rollbackState: OpenAIResponsesChainRollbackState;
+	configuredProvider: string;
+	configuredModel: string;
+	snapshot: ProviderStatePersistenceSnapshot;
+}): void {
+	const key = providerPersistenceKey(
+		options.configuredProvider,
+		options.configuredModel,
+		options.snapshot.lastResponseId,
+	);
+	if (options.providerState.pendingPersistence.has(key) || options.chainState.pendingPersistence) {
+		throw new Error("OpenAI Responses provider state already awaits transcript persistence");
+	}
+	const { promise, resolve } = Promise.withResolvers<void>();
+	let settled = false;
+	let update!: ProviderStatePersistenceUpdate;
+	const finish = (rollback: boolean): void => {
+		if (settled) return;
+		settled = true;
+		if (rollback) restoreOpenAIResponsesChainState(options.chainState, options.rollbackState);
+		if (options.providerState.pendingPersistence.get(key) === update) {
+			options.providerState.pendingPersistence.delete(key);
+		}
+		if (options.chainState.pendingPersistence === promise) options.chainState.pendingPersistence = undefined;
+		resolve();
+	};
+	update = {
+		snapshot: options.snapshot,
+		commit: () => finish(false),
+		rollback: () => finish(true),
+	};
+	options.chainState.pendingPersistence = promise;
+	options.providerState.pendingPersistence.set(key, update);
+}
 function maybeAddOpenRouterAnthropicCacheControl(
 	params: OpenAIResponsesSamplingParams,
 	model: Model<"openai-responses">,
@@ -457,15 +607,41 @@ const streamOpenAIResponsesOnce = (
 			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);
+			const resolvedBaseUrl = (baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
 			const promptCacheBreakpointPolicy =
 				resolveCacheRetention(options?.cacheRetention) !== "none" && options?.promptCache?.mode === "explicit"
 					? (options.promptCache.breakpoint ?? "latest-stable-message")
 					: undefined;
-			if (isOpenAIResponsesStatefulEnabled(options, baseUrl) && routingSessionId && providerSessionState) {
+			let ninferEndpointIdentity: NInferEndpointIdentity | undefined;
+			let ninferRequestIdentity: NInferRequestIdentity | undefined;
+			let providerPersistenceRollbackState: OpenAIResponsesChainRollbackState | undefined;
+			let providerStateRecovery: "full_replay" | undefined;
+			if (isOpenAIResponsesStatefulEnabled(model, options, baseUrl) && routingSessionId && providerSessionState) {
 				chainState = getOpenAIResponsesChainState(providerSessionState, model, baseUrl, routingSessionId);
-				if (chainState.canAppend && chainState.lastPromptCacheBreakpointPolicy !== promptCacheBreakpointPolicy) {
-					resetOpenAIResponsesChainState(chainState);
+				if (chainState.pendingPersistence) await chainState.pendingPersistence;
+			}
+			if (model.compat.ninferStatefulResponses) {
+				if (!routingSessionId) throw new Error("NInfer stateful Responses requires an OMP session identity");
+				ninferEndpointIdentity = await fetchNInferEndpointIdentity({
+					model,
+					baseUrl: resolvedBaseUrl,
+					apiKey,
+					fetch: options?.fetch,
+					signal: requestSignal,
+				});
+				ninferRequestIdentity = createNInferRequestIdentity(routingSessionId);
+				if (chainState) {
+					if (
+						chainState.endpointFingerprint &&
+						chainState.endpointFingerprint !== ninferEndpointIdentity.fingerprint
+					) {
+						resetOpenAIResponsesChainState(chainState);
+					}
+					chainState.endpointFingerprint = ninferEndpointIdentity.fingerprint;
 				}
+			}
+			if (chainState?.canAppend && chainState.lastPromptCacheBreakpointPolicy !== promptCacheBreakpointPolicy) {
+				resetOpenAIResponsesChainState(chainState);
 			}
 			const builtParams = buildParams(
 				model,
@@ -479,7 +655,6 @@ const streamOpenAIResponsesOnce = (
 			const { params, trailingScaffoldingItems } = builtParams;
 			let activeParams = params;
 			let activeTrailingScaffoldingItems = trailingScaffoldingItems;
-			const resolvedBaseUrl = (baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
 			const requestReasoningEffortFallbacks = new Map<string, OpenAIReasoningEffortFallback>();
 			const attemptedReasoningEffortFallbacks = new Set<string>();
 			let pendingReasoningEffortFallback: { key: string; fallback: OpenAIReasoningEffortFallback } | undefined;
@@ -509,6 +684,7 @@ const streamOpenAIResponsesOnce = (
 					? buildOpenAIResponsesChainedParams(params, trailingScaffoldingItems, chainState)
 					: { params };
 			sentPreviousResponseId = chained.previousResponseId;
+			if (chainState) providerPersistenceRollbackState = captureOpenAIResponsesChainState(chainState);
 			const idleTimeoutMs =
 				options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
 			const firstEventTimeoutMs =
@@ -519,9 +695,13 @@ const streamOpenAIResponsesOnce = (
 			const requestUrl = `${resolvedBaseUrl}/responses`;
 			const applyPayloadReplacement = async (requestParams: OpenAIResponsesSamplingParams) => {
 				const replacementPayload = await options?.onPayload?.(requestParams, model);
-				const payload =
+				const basePayload =
 					replacementPayload !== undefined ? (replacementPayload as OpenAIResponsesSamplingParams) : requestParams;
+				const payload = ninferRequestIdentity ? { ...basePayload } : basePayload;
 				applyReasoningEffortFallbackForRequest(payload);
+				if (ninferRequestIdentity) {
+					applyNInferRequestIdentity(payload as unknown as Record<string, unknown>, ninferRequestIdentity);
+				}
 				return payload;
 			};
 			chained = { ...chained, params: await applyPayloadReplacement(chained.params) };
@@ -659,6 +839,7 @@ const streamOpenAIResponsesOnce = (
 										)
 									: { params: fallbackParams };
 							sentPreviousResponseId = fallbackChained.previousResponseId;
+							if (chainState) providerPersistenceRollbackState = captureOpenAIResponsesChainState(chainState);
 							fallbackChained = {
 								...fallbackChained,
 								params: await applyPayloadReplacement(fallbackChained.params),
@@ -676,11 +857,7 @@ const streamOpenAIResponsesOnce = (
 							error instanceof Error &&
 							/previous[ _]?response/i.test(error.message) &&
 							/zero[ _-]?data[ _-]?retention/i.test(error.message);
-						const isPromptBlocked =
-							error instanceof Error &&
-							((error as { code?: string }).code === "invalid_prompt" ||
-								/invalid_prompt|Request blocked/i.test(error.message));
-						if (!zdrRejection && !isPromptBlocked && !isOpenAIResponsesStalePreviousResponseError(error)) {
+						if (!zdrRejection && !isOpenAIResponsesStalePreviousResponseError(error)) {
 							throw error;
 						}
 						// Server rejected the chain baseline: reset, count the failure (or
@@ -688,11 +865,13 @@ const streamOpenAIResponsesOnce = (
 						// transcript. Structurally cannot loop — the retry carries no
 						// previous_response_id.
 						if (zdrRejection) {
-							markOpenAIResponsesChainZeroDataRetention(chainState, error);
+							markOpenAIResponsesChainZeroDataRetention(chainState);
 							// ZDR orgs cannot store responses; the retry uses `store: false`.
 						} else {
-							registerOpenAIResponsesChainStaleFailure(chainState, error);
+							registerOpenAIResponsesChainStaleFailure(chainState);
 						}
+						providerPersistenceRollbackState = captureOpenAIResponsesChainState(chainState);
+						if (!zdrRejection) providerStateRecovery = "full_replay";
 						sentPreviousResponseId = undefined;
 						const currentBuilt = buildParams(
 							model,
@@ -891,12 +1070,53 @@ const streamOpenAIResponsesOnce = (
 				chainState.lastResponseItems = undefined;
 			}
 
+			if (providerStateRecovery) output.provider_state_recovery = providerStateRecovery;
+			if (
+				model.compat.ninferStatefulResponses &&
+				options?.providerStatePersistence === true &&
+				providerSessionState &&
+				chainState?.canAppend &&
+				providerPersistenceRollbackState &&
+				ninferEndpointIdentity &&
+				output.responseId &&
+				chainState.lastParams &&
+				chainState.lastResponseItems
+			) {
+				const updatedAt = new Date().toISOString();
+				const createdAt = chainState.snapshotCreatedAt ?? updatedAt;
+				chainState.snapshotCreatedAt = createdAt;
+				try {
+					stageOpenAIResponsesPersistence({
+						providerState: providerSessionState,
+						chainState,
+						rollbackState: providerPersistenceRollbackState,
+						configuredProvider: model.provider,
+						configuredModel: model.id,
+						snapshot: {
+							schemaVersion: 1,
+							provider: "openai-responses",
+							endpointFingerprint: ninferEndpointIdentity.fingerprint,
+							model: ninferEndpointIdentity.servedModel,
+							lastResponseId: output.responseId,
+							requestBaseline: chainState.lastParams,
+							priorOutputItems: chainState.lastResponseItems,
+							createdAt,
+							updatedAt,
+							requestShapeVersion: ninferEndpointIdentity.requestShapeVersion,
+							promptCacheBreakpointPolicy: chainState.lastPromptCacheBreakpointPolicy,
+							providerStateRecovery,
+						},
+					});
+				} catch (error) {
+					restoreOpenAIResponsesChainState(chainState, providerPersistenceRollbackState);
+					throw error;
+				}
+			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			if (chainState) resetOpenAIResponsesChainState(chainState);
 			const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 			const result = await AIError.finalize(error, {
 				api: model.api,

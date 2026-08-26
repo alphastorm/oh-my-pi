@@ -515,7 +515,7 @@ describe("openai-responses stateful chaining", () => {
 		expect(JSON.stringify(sentRequests[2]?.input)).toContain("First question");
 		expect(JSON.stringify(sentRequests[2]?.input)).toContain("Second question");
 	});
-	it("retries a blocked invalid_prompt previous_response_id with the full transcript", async () => {
+	it("does not replay a generic invalid_prompt failure", async () => {
 		const sentRequests: Array<Record<string, unknown>> = [];
 		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
 			const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -559,13 +559,11 @@ describe("openai-responses stateful chaining", () => {
 			options,
 		).result();
 
-		expect(secondResponse.stopReason).toBe("stop");
-		expect(JSON.stringify(secondResponse.content)).toContain("Answer 3");
-		expect(sentRequests).toHaveLength(3);
+		expect(secondResponse.stopReason).toBe("error");
+		expect(secondResponse.errorMessage).toContain("Request blocked");
+		expect(secondResponse.provider_state_recovery).toBeUndefined();
+		expect(sentRequests).toHaveLength(2);
 		expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
-		expect(sentRequests[2]?.previous_response_id).toBeUndefined();
-		expect(JSON.stringify(sentRequests[2]?.input)).toContain("First question");
-		expect(JSON.stringify(sentRequests[2]?.input)).toContain("Second question");
 	});
 
 	it("disables chaining for the session after repeated stale failures and stops forcing store", async () => {

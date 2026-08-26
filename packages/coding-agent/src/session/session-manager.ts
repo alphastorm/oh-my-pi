@@ -20,7 +20,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
-import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
+import { type BlobPutOptions, type BlobPutResult, BlobStore, parseBlobRef } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
 import {
 	consumeExactCheckpoint,
@@ -1353,6 +1353,14 @@ export class SessionManager {
 	/** Puts a binary blob into the blob store and returns the blob reference. */
 	async putBlob(data: Buffer, options?: BlobPutOptions): Promise<BlobPutResult> {
 		return this.#blobs.put(data, options);
+	}
+	/** Resolve and verify a content-addressed blob reference. */
+	async readBlob(ref: string): Promise<Buffer | null> {
+		const hash = parseBlobRef(ref);
+		if (!hash) return null;
+		const data = await this.#blobs.get(hash);
+		if (!data || Bun.SHA256.hash(data, "hex") !== hash) return null;
+		return data;
 	}
 
 	/** Synchronous variant of {@link putBlob} for rebuild-only render paths. */

@@ -2762,6 +2762,7 @@ export interface ProviderConfigInput {
 	) => Promise<readonly NonNullable<ProviderConfigInput["models"]>[number][]>;
 	models?: Array<{
 		id: string;
+		requestModelId?: string;
 		name: string;
 		api?: Api;
 		baseUrl?: string;

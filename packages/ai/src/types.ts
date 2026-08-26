@@ -329,8 +329,39 @@ export function coerceServiceTierByFamily(value: unknown): ServiceTierByFamily |
 	}
 }
 
+export type ProviderStateRecovery = "full_replay";
+
+/** Provider-owned logical acceleration state waiting for transcript publication. */
+export interface ProviderStatePersistenceSnapshot {
+	schemaVersion: 1;
+	provider: "openai-responses";
+	endpointFingerprint: string;
+	model: string;
+	lastResponseId: string;
+	requestBaseline: unknown;
+	priorOutputItems: unknown;
+	createdAt: string;
+	updatedAt: string;
+	requestShapeVersion: string;
+	promptCacheBreakpointPolicy?: "latest-stable-message" | "none";
+	providerStateRecovery?: ProviderStateRecovery;
+}
+
+export interface ProviderStatePersistenceSelection {
+	provider: string;
+	model: string;
+	responseId: string;
+}
+
+/** Two-phase provider update: session persistence owns commit/rollback. */
+export interface ProviderStatePersistenceUpdate {
+	snapshot: ProviderStatePersistenceSnapshot;
+	commit(): void;
+	rollback(): void;
+}
 export interface ProviderSessionState {
 	close(): void;
+	takePendingPersistence?(selection: ProviderStatePersistenceSelection): ProviderStatePersistenceUpdate | undefined;
 }
 
 export interface ProviderResponseMetadata {
@@ -520,6 +551,8 @@ export interface StreamOptions {
 	 * `false` so `previous_response_id` cannot explain a result.
 	 */
 	statefulResponses?: boolean;
+	/** Persist provider acceleration only for the transcript-owning primary loop. */
+	providerStatePersistence?: boolean;
 	/**
 	 * Disable native reasoning when the caller supplies an external scratchpad.
 	 * OpenAI Responses emits `reasoning: { effort: "none" }`; Anthropic and
@@ -1005,6 +1038,8 @@ export interface AssistantMessage {
 	/** Threshold class used for admission and scheduling. */
 	providerRequestClass?: string;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
+	/** Content-safe receipt when a stale provider chain was replaced by one full replay. */
+	provider_state_recovery?: ProviderStateRecovery;
 	/**
 	 * Name of the upstream provider an aggregator routed this request to, as
 	 * reported in the response (e.g. OpenRouter's top-level `provider` field:

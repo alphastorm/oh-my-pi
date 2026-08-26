@@ -61,6 +61,7 @@ import type {
 	OAuthAccountIdentity,
 	ProviderResponseMetadata,
 	ProviderSessionState,
+	ProviderStatePersistenceUpdate,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
 	ResetCreditTarget,
@@ -324,6 +325,11 @@ import {
 import { ModelControls, type ModelControlsHost } from "./model-controls";
 import { isPrewalkPlanNudge, PrewalkCoordinator, type PrewalkCoordinatorHost } from "./prewalk";
 import {
+	finalizeProviderStateEnvelope,
+	PROVIDER_STATE_CUSTOM_TYPE,
+	prepareProviderStateEnvelope,
+} from "./provider-state";
+import {
 	isAdvisorCard,
 	isDisplayableQueuedMessage,
 	isHiddenUserCompanion,
@@ -422,7 +428,7 @@ const noOpUIContext: ExtensionUIContext = {
 
 type MessageEndPersistenceSlot = {
 	readonly promise: Promise<void>;
-	persist: (persistMessage: () => void) => Promise<void>;
+	persist: (persistMessage: () => void | Promise<void>) => Promise<void>;
 	release: () => void;
 };
 
@@ -746,6 +752,7 @@ export class AgentSession {
 	#yieldTerminationPending = false;
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
+	#providerStatePersistenceFailure: Error | undefined;
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
 	readonly #memory: SessionMemory;
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
@@ -2394,7 +2401,7 @@ export class AgentSession {
 			persist: async persistMessage => {
 				await previous;
 				try {
-					persistMessage();
+					await persistMessage();
 				} finally {
 					resolve();
 					clear();
@@ -2609,6 +2616,51 @@ export class AgentSession {
 	 * The original thinking stays on the assistant message so live render, reload,
 	 * and display-reset rebuilds keep showing it.
 	 */
+	#takePendingProviderStateUpdate(message: AssistantMessage): ProviderStatePersistenceUpdate | undefined {
+		if (!message.responseId) return undefined;
+		let selected: ProviderStatePersistenceUpdate | undefined;
+		for (const state of this.#providerSessionState.values()) {
+			const candidate = state.takePendingPersistence?.({
+				provider: message.provider,
+				model: message.model,
+				responseId: message.responseId,
+			});
+			if (!candidate) continue;
+			if (selected) throw new Error("Multiple providers staged state for one assistant response");
+			selected = candidate;
+		}
+		return selected;
+	}
+
+	async #persistProviderStateBeforeEmission(
+		message: AssistantMessage,
+		update: ProviderStatePersistenceUpdate,
+	): Promise<void> {
+		const persistedMessage = message as PersistedAssistantMessage;
+		const priorEntryId = persistedMessage[kPersistedSessionEntryId];
+		try {
+			const prepared = await prepareProviderStateEnvelope(this.sessionManager, update.snapshot);
+			await this.sessionManager.appendEntriesAtomically(() => {
+				this.#persistSessionMessageIfMissing(message);
+				const lastCommittedTurnId = persistedMessage[kPersistedSessionEntryId];
+				if (!lastCommittedTurnId) throw new Error("Assistant turn was not staged for provider state publication");
+				const envelope = finalizeProviderStateEnvelope({
+					prepared,
+					sessionId: this.sessionId,
+					lastCommittedTurnId,
+					branch: this.sessionManager.getBranch(),
+				});
+				this.sessionManager.appendCustomEntry(PROVIDER_STATE_CUSTOM_TYPE, envelope);
+			});
+			update.commit();
+		} catch (error) {
+			update.rollback();
+			this.#persistedMessageKeys = undefined;
+			if (priorEntryId === undefined) delete persistedMessage[kPersistedSessionEntryId];
+			else persistedMessage[kPersistedSessionEntryId] = priorEntryId;
+			throw error;
+		}
+	}
 	#demoteInterruptedThinkingOnUserInterrupt(
 		message: AssistantMessage,
 	): CustomMessage<InterruptedThinkingDetails> | undefined {
@@ -2858,6 +2910,26 @@ export class AgentSession {
 			}
 		}
 
+		let providerStatePersistedBeforeEmission = false;
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			const assistantMessage = event.message;
+			try {
+				const update = this.#takePendingProviderStateUpdate(assistantMessage);
+				if (update) {
+					this.#providerStatePersistenceFailure = undefined;
+					const persistProviderState = () => this.#persistProviderStateBeforeEmission(assistantMessage, update);
+					if (messageEndPersistence) await messageEndPersistence.persist(persistProviderState);
+					else await persistProviderState();
+					providerStatePersistedBeforeEmission = true;
+				}
+			} catch (error) {
+				const failure = error instanceof Error ? error : new Error(String(error));
+				this.#providerStatePersistenceFailure = failure;
+				messageEndPersistence?.release();
+				this.agent.abort();
+				throw failure;
+			}
+		}
 		if (event.type === "turn_start") {
 			this.#advisors.onPrimaryTurnStart();
 			const usage = this.getSessionStats().tokens;
@@ -2878,7 +2950,7 @@ export class AgentSession {
 			try {
 				await this.#emitSessionEvent(displayEvent);
 			} catch (error) {
-				if (event.type === "message_end") {
+				if (event.type === "message_end" && !providerStatePersistedBeforeEmission) {
 					const persistMessageEnd = () => this.#persistMessageEnd(event.message);
 					try {
 						if (messageEndPersistence) await messageEndPersistence.persist(persistMessageEnd);
@@ -2944,11 +3016,13 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
-			const persistMessageEnd = () => this.#persistMessageEnd(event.message);
-			if (messageEndPersistence) {
-				await messageEndPersistence.persist(persistMessageEnd);
-			} else {
-				persistMessageEnd();
+			if (!providerStatePersistedBeforeEmission) {
+				const persistMessageEnd = () => this.#persistMessageEnd(event.message);
+				if (messageEndPersistence) {
+					await messageEndPersistence.persist(persistMessageEnd);
+				} else {
+					persistMessageEnd();
+				}
 			}
 			if (interruptedThinkingMessage) {
 				this.sessionManager.appendCustomMessageEntry(
@@ -3771,6 +3845,12 @@ export class AgentSession {
 	 * execution still emit there).
 	 */
 	async #beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
+		await this.#messageEndPersistenceTail;
+		if (this.#providerStatePersistenceFailure) {
+			const failure = this.#providerStatePersistenceFailure;
+			this.#providerStatePersistenceFailure = undefined;
+			throw failure;
+		}
 		const runner = this.#extensionRunner;
 		if (!runner?.hasHandlers("tool_call")) return undefined;
 		const metadata = ctx.toolCall.providerMetadata;

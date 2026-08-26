@@ -17,6 +17,7 @@ const emptyUsage: Usage = {
 
 const compat: ResolvedOpenAICompat = {
 	supportsStore: true,
+	ninferStatefulResponses: false,
 	supportsDeveloperRole: true,
 	supportsMultipleSystemMessages: true,
 	supportsReasoningEffort: true,

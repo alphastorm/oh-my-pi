@@ -82,6 +82,7 @@ export function buildCustomModelOverlay(
 		api,
 		baseUrl: modelDef.baseUrl ?? providerBaseUrl,
 		name: modelDef.name,
+		requestModelId: modelDef.requestModelId,
 		reasoning: modelDef.reasoning,
 		thinking: modelDef.thinking,
 		input: modelDef.input,
@@ -123,6 +124,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
 	return buildModel({
 		id: resolvedModel.id,
+		requestModelId: resolvedModel.requestModelId,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
 		api: resolvedModel.api,
 		provider: resolvedModel.provider,

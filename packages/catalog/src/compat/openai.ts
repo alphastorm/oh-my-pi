@@ -478,6 +478,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 
 	const compat: ResolvedOpenAICompat = {
 		supportsStore: !isNonStandard,
+		ninferStatefulResponses: false,
 		// `developer` is an OpenAI-Responses-era extension to the chat-completions schema. Almost
 		// every OpenAI-compatible host other than OpenAI itself (and Azure OpenAI, which mirrors
 		// the schema exactly) treats it as an unknown role: Moonshot returns a 400 "tokenization
@@ -729,6 +730,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		supportsDeveloperRole: isAzure || isOpenAIUrl || hostMatchesUrl(baseUrl, "githubCopilot"),
 		supportsStrictMode: isAzure || detectStrictModeSupport(spec.provider, baseUrl),
 		// Paid `xai` and SuperGrok `xai-oauth` share api.x.ai `/v1/responses`.
+		ninferStatefulResponses: false,
 		// Only the Grok effort-capable allowlist accepts `reasoning.effort`;
 		// other reasoners (grok-build, grok-code-fast-1, …) 400 if it is sent.
 		supportsReasoningEffort: !isXaiHost || isGrokReasoningEffortCapable(id),

@@ -23,6 +23,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const OpenAICompatFields = {
 		"supportsStore?": "boolean",
+		"ninferStatefulResponses?": "boolean",
 		"supportsDeveloperRole?": "boolean",
 		"supportsMultipleSystemMessages?": "boolean",
 		"supportsReasoningEffort?": "boolean",
@@ -169,6 +170,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const ModelDefinitionSchema = type({
 		id: "string",
+		"requestModelId?": "string",
 		"name?": "string",
 		"api?": ApiSchema,
 		"baseUrl?": "string",
@@ -224,6 +226,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const ModelOverrideSchema = type({
 		"name?": "string",
+		"requestModelId?": "string",
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',

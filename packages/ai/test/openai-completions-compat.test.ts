@@ -185,6 +185,7 @@ describe("openai-completions compatibility", () => {
 		} as ModelSpec<"openai-completions">);
 		const compat = {
 			supportsStore: true,
+			ninferStatefulResponses: false,
 			supportsDeveloperRole: true,
 			supportsMultipleSystemMessages: true,
 			supportsReasoningEffort: true,

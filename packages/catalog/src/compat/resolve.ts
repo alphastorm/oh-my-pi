@@ -474,6 +474,7 @@ function detectOpenAICompat(
 
 	return {
 		supportsStore: !isNonStandard,
+		ninferStatefulResponses: false,
 		supportsDeveloperRole: isOpenAIHost || isAzureHost,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
 		supportsReasoningEffort: !isGrok && !d.isXiaomiMimo && (!(d.isZai || d.isZhipu) || supportsZaiReasoningEffort),
@@ -710,6 +711,7 @@ function resolveOpenAIResponsesPolicy(
 
 	const compat: ResolvedOpenAIResponsesCompat = {
 		supportsDeveloperRole: isAzure || isOpenAIUrl || hostMatchesUrl(baseUrl, "githubCopilot"),
+		ninferStatefulResponses: false,
 		supportsStrictMode:
 			isAzure ||
 			hostMatchesUrl(baseUrl, "openai") ||

@@ -2185,6 +2185,7 @@ function mapOptionsForApi<TApi extends Api>(
 		streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
 		codexSseMaxAttempts: options?.codexSseMaxAttempts,
 		providerSessionState: options?.providerSessionState,
+		providerStatePersistence: options?.providerStatePersistence,
 		maxInFlightRequests: options?.maxInFlightRequests,
 		toolNamespacesInfo: options?.toolNamespacesInfo,
 		onPayload: options?.onPayload,

@@ -195,6 +195,8 @@ export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "qwen" | "think
 export interface OpenAICompat {
 	/** Whether the provider supports the `store` field. Default: auto-detected from URL. */
 	supportsStore?: boolean;
+	/** Explicitly enables authenticated, persisted NInfer Responses continuation. Default: false. */
+	ninferStatefulResponses?: boolean;
 	/** Whether the provider supports the `developer` role (vs `system`). Default: auto-detected from URL. */
 	supportsDeveloperRole?: boolean;
 	/**
@@ -694,6 +696,8 @@ type ResolvedToolStrictMode = NonNullable<OpenAICompat["toolStrictMode"]> | "mix
  * Each builder still computes its own per-surface value when defaults diverge.
  */
 export interface ResolvedOpenAISharedCompat {
+	/** Explicit model capability for authenticated NInfer Responses continuation. */
+	ninferStatefulResponses: boolean;
 	supportsDeveloperRole: boolean;
 	supportsStrictMode: boolean;
 	supportsReasoningEffort: boolean;

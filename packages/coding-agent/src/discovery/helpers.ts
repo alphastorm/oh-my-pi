@@ -834,13 +834,21 @@ export function parseClaudePluginsRegistry(content: string): ClaudePluginsRegist
  *
  * This is the single source of truth for "active project root" used by install,
  * uninstall, list, upgrade, discovery, and doctor. Deterministic for a given `cwd`.
+ * @param cwd Directory from which to resolve the nearest project anchor.
+ * @param projectBoundary User-home boundary that must not be treated as a project root.
  */
-export async function resolveActiveProjectRegistryPath(cwd: string): Promise<string | null> {
+export async function resolveActiveProjectRegistryPath(
+	cwd: string,
+	projectBoundary: string = os.homedir(),
+): Promise<string | null> {
 	// Pass 1: walk up looking for an existing .omp/ directory (nearest wins).
-	// Stop before os.homedir() — ~/.omp/ is the user-level config dir, not a project root.
-	const homeDir = os.homedir();
-	let dir = path.resolve(cwd);
-	while (dir !== homeDir) {
+	// User-home and shared OS-temporary roots are config/runtime boundaries, not project roots.
+	const resolvedCwd = path.resolve(cwd);
+	const boundaries = new Set([path.resolve(projectBoundary)]);
+	const tempBoundary = path.resolve(os.tmpdir());
+	if (resolvedCwd === tempBoundary || resolvedCwd.startsWith(tempBoundary + path.sep)) boundaries.add(tempBoundary);
+	let dir = resolvedCwd;
+	while (!boundaries.has(dir)) {
 		try {
 			const stat = await fs.promises.stat(path.join(dir, getConfigDirName()));
 			if (stat.isDirectory()) {
@@ -855,8 +863,8 @@ export async function resolveActiveProjectRegistryPath(cwd: string): Promise<str
 	}
 
 	// Pass 2: walk up looking for .git as a fallback anchor.
-	dir = path.resolve(cwd);
-	while (dir !== homeDir) {
+	dir = resolvedCwd;
+	while (!boundaries.has(dir)) {
 		try {
 			await fs.promises.stat(path.join(dir, ".git"));
 			return path.join(dir, getConfigDirName(), "plugins", "installed_plugins.json");
@@ -955,7 +963,7 @@ export async function listClaudePluginRoots(
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
 	const claudeConfigDir = resolveClaudePaths(home).configDir;
 	const ompRegistryPath = path.join(getPluginsDir(home), "installed_plugins.json");
-	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd) : null;
+	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd, home) : null;
 	const projectRoot = resolvedProjectPath ? path.dirname(path.dirname(path.dirname(resolvedProjectPath))) : cwd;
 	const activeClaudeProjectPath = projectRoot ? await canonicalClaudeProjectPath(projectRoot) : null;
 	const canonicalCwd = cwd ? await canonicalClaudeProjectPath(cwd) : null;

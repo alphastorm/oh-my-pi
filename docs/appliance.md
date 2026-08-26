@@ -18,11 +18,14 @@ omp appliance install qwen3.8 --gpu auto
 omp appliance status --json
 omp appliance benchmark --quick --json
 omp appliance rollback --json
+
+# Redacted local support receipt; never uploads
+omp appliance support-bundle
 ```
 
-`doctor`, `plan`, and `status` do not write appliance state, receipts, secrets, or candidate resources. `benchmark` accepts only `--quick`; it runs the bounded qualification cases and writes a receipt. `--gpu` accepts `auto`, `rtx5090`, or `rtx4090`. Candidate ports must be between 1 and 65535 and bind to loopback.
+`doctor`, `plan`, and `status` do not write appliance state, receipts, secrets, or candidate resources. `benchmark` accepts only `--quick`; it runs the bounded qualification cases and writes a receipt. `support-bundle` reuses the content-safe host, installation, quick-qualification, and successful-rollback evidence; it never uploads. `--gpu` accepts `auto`, `rtx5090`, or `rtx4090`. Candidate ports must be between 1 and 65535 and bind to loopback.
 
-Without `--json`, each command prints a short status followed by the same JSON receipt. With `--json`, stdout contains only the receipt. A blocked `doctor` or `plan` exits successfully because the result is diagnostic. Blocked mutating operations and failed operations exit nonzero.
+Without `--json`, each command except `support-bundle` prints a short status followed by the same JSON receipt. With `--json`, stdout contains only the receipt; `support-bundle` is always JSON-only. Its receipt includes GPU model, OS, driver, runtime release, model SHA-256, profile, context, protocol/tool and rollback verdicts, cold/warm TTFT, prefix reuse, and decode throughput. Missing evidence is represented as `null` with a blocked status, never as an inferred measurement. Prompts, outputs, paths, usernames, hostnames, identifiers, argv, environment, and secrets are excluded. A blocked `doctor` or `plan` exits successfully because the result is diagnostic. Other blocked or failed operations exit nonzero.
 
 ## Registry profiles
 

@@ -3,7 +3,7 @@ export const APPLIANCE_RECEIPT_SCHEMA_VERSION = 1 as const;
 
 export type ApplianceProfileId = "rtx5090-linux" | "rtx4090-windows";
 export type ApplianceGpuSelector = "auto" | "rtx5090" | "rtx4090";
-export type ApplianceAction = "doctor" | "plan" | "install" | "status" | "benchmark" | "rollback";
+export type ApplianceAction = "doctor" | "plan" | "install" | "status" | "benchmark" | "rollback" | "support-bundle";
 export type ApplianceCapability =
 	| "tools"
 	| "reasoning"
@@ -122,6 +122,12 @@ export interface ApplianceBenchmarkCase {
 export interface ApplianceQuickQualification {
 	ok: boolean;
 	cases: ApplianceBenchmarkCase[];
+	metrics?: {
+		coldTtftMs: number;
+		warmTtftMs: number;
+		prefixReusePercent: number;
+		decodeTokensPerSecond: number;
+	};
 }
 
 export interface ApplianceCandidate {

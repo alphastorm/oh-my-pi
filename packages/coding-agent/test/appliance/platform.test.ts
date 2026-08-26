@@ -93,4 +93,90 @@ describe("local appliance platform", () => {
 			await child.exited;
 		}
 	});
+
+	it("measures TTFT, prefix reuse, and decode throughput from bounded Responses streams", async () => {
+		using temp = TempDir.createSync("@omp-appliance-platform-metrics-");
+		const platform = new LocalAppliancePlatform(temp.path());
+		const originalFetch = globalThis.fetch;
+		const requests: Array<Record<string, unknown>> = [];
+		let requestNumber = 0;
+		const responseBody = (
+			id: string,
+			text: string,
+			inputTokens: number,
+			cachedTokens: number,
+			outputTokens: number,
+		): Record<string, unknown> => ({
+			id,
+			output: [{ type: "message", content: [{ type: "output_text", text }] }],
+			usage: {
+				input_tokens: inputTokens,
+				input_tokens_details: { cached_tokens: cachedTokens },
+				output_tokens: outputTokens,
+			},
+		});
+		const streamResponse = (
+			body: Record<string, unknown>,
+			firstTokenDelayMs: number,
+			completedDelayMs: number,
+		): Response => {
+			const encoder = new TextEncoder();
+			const event = (type: string, payload: Record<string, unknown>): Uint8Array =>
+				encoder.encode(`event: ${type}\ndata: ${JSON.stringify({ type, ...payload })}\n\n`);
+			return new Response(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						setTimeout(
+							() => controller.enqueue(event("response.output_text.delta", { delta: "token" })),
+							firstTokenDelayMs,
+						);
+						setTimeout(() => {
+							controller.enqueue(event("response.completed", { response: body }));
+							controller.close();
+						}, completedDelayMs);
+					},
+				}),
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		};
+
+		globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			requestNumber += 1;
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			requests.push(body);
+			switch (requestNumber) {
+				case 1:
+					return Response.json({
+						output: [{ type: "function_call", name: "echo", arguments: JSON.stringify({ value: "ok" }) }],
+					});
+				case 2:
+					return streamResponse(responseBody("resp-decode", "OMP_OK", 4, 0, 4), 2, 12);
+				case 3:
+					return streamResponse(responseBody("resp-cold", "one", 4_100, 0, 2), 30, 35);
+				case 4:
+					return streamResponse(responseBody("resp-warm", "two", 4_102, 4_098, 2), 2, 7);
+				default:
+					throw new Error("unexpected qualification request");
+			}
+		}) as typeof fetch;
+
+		try {
+			const result = await platform.quickQualification(
+				{ candidateId: "candidate", handle: "candidates/candidate", endpoint: "http://127.0.0.1:8000", port: 8000 },
+				"private-test-secret",
+			);
+
+			expect(result.ok).toBe(true);
+			expect(result.metrics).toBeDefined();
+			expect(result.metrics?.coldTtftMs).toBeGreaterThanOrEqual(20);
+			expect(result.metrics?.warmTtftMs).toBeLessThan(result.metrics?.coldTtftMs ?? 0);
+			expect(result.metrics?.prefixReusePercent).toBeCloseTo(99.902, 3);
+			expect(result.metrics?.decodeTokensPerSecond).toBeGreaterThan(0);
+			expect(requests.map(request => request.stream)).toEqual([undefined, true, true, true]);
+			expect(requests[3]?.previous_response_id).toBe("resp-cold");
+			expect(JSON.stringify(result)).not.toContain("private-test-secret");
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
 });

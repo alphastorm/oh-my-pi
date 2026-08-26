@@ -90,6 +90,19 @@ describe("resolveActiveProjectRegistryPath", () => {
 		expect(result).toBe(path.join(tmpDir, ".omp", "plugins", "installed_plugins.json"));
 	});
 
+	it("does not treat the shared OS temporary root as a project", async () => {
+		fs.mkdirSync(path.join(tmpDir, ".omp"), { recursive: true });
+		const projectDir = path.join(tmpDir, "project");
+		const cwd = path.join(projectDir, "sub");
+		fs.mkdirSync(path.join(projectDir, ".git"), { recursive: true });
+		fs.mkdirSync(cwd, { recursive: true });
+		vi.spyOn(os, "tmpdir").mockReturnValue(tmpDir);
+
+		const result = await resolveActiveProjectRegistryPath(cwd);
+
+		expect(result).toBe(path.join(projectDir, ".omp", "plugins", "installed_plugins.json"));
+	});
+
 	it("returns null when neither .omp/ nor .git/ found anywhere in the tree", async () => {
 		// Start at the filesystem root — guaranteed to have no .omp/ or .git/ ancestors.
 		const result = await resolveActiveProjectRegistryPath(path.sep);

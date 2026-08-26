@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,7 +13,7 @@ import {
 	parseSkillInvocation,
 	type Skill,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
@@ -45,6 +45,25 @@ const DISABLE_ALL_BUILTIN_SKILLS = {
 	enableAgentsUser: false,
 	enableAgentsProject: false,
 } as const;
+
+const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+const fallbackAgentDir = getAgentDir();
+let isolatedAgentDir: string;
+
+beforeAll(async () => {
+	isolatedAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skills-agent-"));
+	setAgentDir(isolatedAgentDir);
+});
+
+afterAll(async () => {
+	if (originalAgentDirEnv) {
+		setAgentDir(originalAgentDirEnv);
+	} else {
+		setAgentDir(fallbackAgentDir);
+		delete process.env.PI_CODING_AGENT_DIR;
+	}
+	await removeWithRetries(isolatedAgentDir);
+});
 
 describe("skills", () => {
 	describe("loadSkillsFromDir", () => {

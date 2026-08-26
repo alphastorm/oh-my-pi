@@ -29,7 +29,13 @@ describe("remember(extract) wires the LLM fact extractor", () => {
 			complete: prompt => {
 				calls += 1;
 				expect(prompt).toContain("dark roast");
-				return "The user loves coffee\nThe user prefers dark roast";
+				return JSON.stringify({
+					facts: ["The user loves coffee", "The user prefers dark roast"],
+					instructions: [],
+					preferences: [],
+					timelines: [],
+					kg: [],
+				});
 			},
 		});
 
@@ -153,7 +159,7 @@ describe("remember(extract) wires the LLM fact extractor", () => {
 		const memory = makeMemory({
 			complete: capturedPrompt => {
 				prompt = capturedPrompt;
-				return "The user prefers tabs";
+				return JSON.stringify({ facts: ["The user prefers tabs"] });
 			},
 		});
 

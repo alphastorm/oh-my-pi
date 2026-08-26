@@ -52,7 +52,6 @@ import {
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
-import { Tokenizer } from "./tokenizer";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import {
 	type AgentTelemetry,
@@ -70,6 +69,7 @@ import {
 	startExecuteToolSpan,
 	startInvokeAgentSpan,
 } from "./telemetry";
+import { Tokenizer } from "./tokenizer";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -125,27 +125,51 @@ function requestTokenizer(model: Model): Tokenizer {
 	return tokenizer;
 }
 
+/** Replace only active ancestor cycles; repeated non-cyclic references serialize normally. */
+function requestContextJsonReplacer(): (this: unknown, key: string, value: unknown) => unknown {
+	const ancestors: object[] = [];
+	return function (this: unknown, _key: string, value: unknown): unknown {
+		if (typeof value === "bigint") return value.toString();
+		if (value === null || typeof value !== "object") return value;
+		while (ancestors.length > 0 && ancestors.at(-1) !== this) ancestors.pop();
+		if (ancestors.includes(value)) return "[Circular]";
+		ancestors.push(value);
+		return value;
+	};
+}
+
+function serializeRequestContextForEstimate(llmContext: Context): string {
+	try {
+		return JSON.stringify(
+			{
+				systemPrompt: llmContext.systemPrompt ?? null,
+				messages: llmContext.messages,
+				tools: llmContext.tools ?? null,
+			},
+			requestContextJsonReplacer(),
+		);
+	} catch {
+		// Request telemetry must never abort the provider call because optional metadata is not JSON-safe.
+		return `{"unserializable":true,"messages":${llmContext.messages.length},"tools":${llmContext.tools?.length ?? 0}}`;
+	}
+}
+
 /**
- * Pre-dispatch request telemetry. Restores the session contract the v17.2.1
- * line recorded through its provider-admission gate: the stats parser and
- * Code Mode metrics read `queueMs`, `estimatedContextTokens`,
- * `inputTokenEstimator`, and `providerRequestClass` from persisted assistant
- * messages, and the exact-telemetry health join requires them non-null. The
- * estimate serializes the outbound context through the model-scoped tokenizer:
- * known families use their exact native encoding, PI_TOKENIZER_ACCURATE uses
- * o200k for unknown families, and the default unknown-family path keeps the
- * historical bytes/4 `serialized-v1` estimate.
+ * Pre-dispatch request telemetry. The stats parser and Code Mode metrics read
+ * `queueMs`, `estimatedContextTokens`, `inputTokenEstimator`, and
+ * `providerRequestClass` from persisted assistant messages. The estimate
+ * serializes the outbound context through the model-scoped tokenizer while
+ * treating optional non-JSON metadata as non-fatal.
  */
-function estimateRequestContextTokens(llmContext: Context, model: Model): {
+function estimateRequestContextTokens(
+	llmContext: Context,
+	model: Model,
+): {
 	estimatedContextTokens: number;
 	inputTokenEstimator: string;
 	providerRequestClass: string;
 } {
-	const serialized = JSON.stringify({
-		systemPrompt: llmContext.systemPrompt ?? null,
-		messages: llmContext.messages,
-		tools: llmContext.tools ?? null,
-	});
+	const serialized = serializeRequestContextForEstimate(llmContext);
 	const estimatedContextTokens = requestTokenizer(model).countTokens(serialized);
 	const accurate = process.env.PI_TOKENIZER_ACCURATE === "1" && process.env.NODE_ENV !== "test";
 	const modelTokenizer = process.env.NODE_ENV === "test" ? undefined : model.tokenizer;
@@ -156,8 +180,7 @@ function estimateRequestContextTokens(llmContext: Context, model: Model): {
 			: accurate
 				? "serialized-o200k-v1"
 				: "serialized-v1",
-		providerRequestClass:
-			estimatedContextTokens >= LONG_CONTEXT_REQUEST_THRESHOLD_TOKENS ? "long" : "short",
+		providerRequestClass: estimatedContextTokens >= LONG_CONTEXT_REQUEST_THRESHOLD_TOKENS ? "long" : "short",
 	};
 }
 

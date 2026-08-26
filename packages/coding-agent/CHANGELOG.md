@@ -165,6 +165,7 @@
 - Long streaming thinking and reasoning output now continues into terminal scrollback during a turn instead of remaining clipped to the viewport.
 - Added capability-gated, persisted NInfer Responses continuation with atomic session snapshots, exact request identity, and one-shot stale-chain recovery.
 - Added the registry-gated `omp appliance` lifecycle for checksum-pinned local NInfer services, read-only diagnostics, atomic route promotion, bounded qualification, and proven rollback.
+- Added `omp appliance support-bundle` for explicit, local-only JSON compatibility evidence with unavailable measurements reported as blocked rather than inferred.
 
 ### Changed
 

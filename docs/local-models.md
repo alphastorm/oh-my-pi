@@ -1,5 +1,8 @@
 # Embedded Local Tiny-Model Experiments
 
+> [!NOTE]
+> This page covers embedded CPU-oriented tiny models for auxiliary tasks. For the checksum-pinned Qwen3.8 GPU appliance and private long-session routing, start with the [local appliance quickstart](./quickstart.md).
+
 This document summarizes the experiments behind the optional **local** tiny-model paths for
 session-title generation (`providers.tinyModel`), Mnemopi memory extraction/consolidation
 (`providers.memoryModel`), and the `auto` thinking-level difficulty classifier

@@ -119,6 +119,89 @@ async function fetchJson(url: string, init: RequestInit): Promise<Record<string,
 	return value;
 }
 
+interface ResponsesStreamMeasurement {
+	response: Record<string, unknown>;
+	ttftMs: number;
+	decodeMs: number;
+}
+
+async function fetchResponsesStream(url: string, init: RequestInit): Promise<ResponsesStreamMeasurement> {
+	const started = performance.now();
+	const response = await fetch(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+	if (!response.ok) throw new Error(`Appliance endpoint returned HTTP ${response.status}`);
+	if (!response.body) throw new Error("Appliance endpoint returned an empty stream");
+
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let buffer = "";
+	let firstTokenAt: number | undefined;
+	let completedAt: number | undefined;
+	let completed: Record<string, unknown> | undefined;
+	const consume = (block: string): void => {
+		const data = block
+			.split("\n")
+			.filter(line => line.startsWith("data:"))
+			.map(line => line.slice(5).trimStart())
+			.join("\n");
+		if (!data || data === "[DONE]") return;
+		const value: unknown = JSON.parse(data);
+		if (!isRecord(value) || typeof value.type !== "string") {
+			throw new Error("Appliance endpoint returned an invalid stream event");
+		}
+		if (
+			firstTokenAt === undefined &&
+			(value.type === "response.output_text.delta" || value.type === "response.reasoning_text.delta")
+		) {
+			firstTokenAt = performance.now();
+		}
+		if (value.type === "response.completed") {
+			if (!isRecord(value.response)) throw new Error("Appliance endpoint returned an invalid completed response");
+			completed = value.response;
+			completedAt = performance.now();
+		} else if (
+			value.type === "response.failed" ||
+			value.type === "response.cancelled" ||
+			value.type === "response.incomplete"
+		) {
+			throw new Error("Appliance endpoint returned an incomplete response stream");
+		}
+	};
+
+	while (true) {
+		const { done, value } = await reader.read();
+		buffer += decoder.decode(value, { stream: !done });
+		buffer = buffer.replaceAll("\r\n", "\n");
+		if (buffer.length > COMMAND_OUTPUT_LIMIT) throw new Error("Appliance response stream exceeded the size limit");
+		let boundary = buffer.indexOf("\n\n");
+		while (boundary >= 0) {
+			consume(buffer.slice(0, boundary));
+			buffer = buffer.slice(boundary + 2);
+			boundary = buffer.indexOf("\n\n");
+		}
+		if (done) break;
+	}
+	if (buffer.trim()) consume(buffer);
+	if (!completed || firstTokenAt === undefined || completedAt === undefined) {
+		throw new Error("Appliance response stream omitted measurement events");
+	}
+	return {
+		response: completed,
+		ttftMs: Math.round(firstTokenAt - started),
+		decodeMs: Math.max(completedAt - firstTokenAt, 1),
+	};
+}
+
+function responseUsage(
+	response: Record<string, unknown>,
+): { inputTokens: number; cachedTokens: number; outputTokens: number } | undefined {
+	if (!isRecord(response.usage) || !isRecord(response.usage.input_tokens_details)) return undefined;
+	const inputTokens = safeNumber(response.usage.input_tokens);
+	const cachedTokens = safeNumber(response.usage.input_tokens_details.cached_tokens);
+	const outputTokens = safeNumber(response.usage.output_tokens);
+	if (inputTokens === undefined || cachedTokens === undefined || outputTokens === undefined) return undefined;
+	return { inputTokens, cachedTokens, outputTokens };
+}
+
 function extractOutputText(value: unknown): string {
 	if (!value || typeof value !== "object") return "";
 	if (Array.isArray(value)) return value.map(extractOutputText).join("");
@@ -481,8 +564,9 @@ export class LocalAppliancePlatform implements AppliancePlatform {
 			}
 			return JSON.stringify({ type: "function_call", name, value: argumentsValue.value });
 		});
+		let decodeTokensPerSecond: number | undefined;
 		const decodeCase = await runCase("short-decode", async () => {
-			const response = await fetchJson(`${endpoint}/v1/responses`, {
+			const measurement = await fetchResponsesStream(`${endpoint}/v1/responses`, {
 				method: "POST",
 				headers: authHeaders(secret),
 				body: JSON.stringify({
@@ -490,16 +574,24 @@ export class LocalAppliancePlatform implements AppliancePlatform {
 					input: [{ role: "user", content: [{ type: "input_text", text: "Reply exactly OMP_OK." }] }],
 					max_output_tokens: 16,
 					store: true,
+					stream: true,
 					...qualificationFields("decode"),
 				}),
 			});
-			const text = extractOutputText(response).trim();
+			const text = extractOutputText(measurement.response).trim();
+			const usage = responseUsage(measurement.response);
 			if (text !== "OMP_OK") throw new Error("incorrect-decode");
+			if (!usage || usage.outputTokens < 2) throw new Error("missing-decode-usage");
+			decodeTokensPerSecond =
+				Math.round(((usage.outputTokens - 1) / (measurement.decodeMs / 1_000)) * 1_000) / 1_000;
 			return text;
 		});
+		let coldTtftMs: number | undefined;
+		let warmTtftMs: number | undefined;
+		let prefixReusePercent: number | undefined;
 		const reuseCase = await runCase("long-prefill-reuse", async () => {
 			const fields = qualificationFields("reuse");
-			const first = await fetchJson(`${endpoint}/v1/responses`, {
+			const first = await fetchResponsesStream(`${endpoint}/v1/responses`, {
 				method: "POST",
 				headers: authHeaders(secret),
 				body: JSON.stringify({
@@ -509,12 +601,13 @@ export class LocalAppliancePlatform implements AppliancePlatform {
 					],
 					max_output_tokens: 8,
 					store: true,
+					stream: true,
 					...fields,
 				}),
 			});
-			const responseId = safeString(first.id);
+			const responseId = safeString(first.response.id);
 			if (!responseId) throw new Error("missing-response-id");
-			const second = await fetchJson(`${endpoint}/v1/responses`, {
+			const second = await fetchResponsesStream(`${endpoint}/v1/responses`, {
 				method: "POST",
 				headers: authHeaders(secret),
 				body: JSON.stringify({
@@ -523,15 +616,28 @@ export class LocalAppliancePlatform implements AppliancePlatform {
 					input: [{ role: "user", content: [{ type: "input_text", text: "Reply two." }] }],
 					max_output_tokens: 8,
 					store: true,
+					stream: true,
 					...fields,
 					ninfer_request_id: sha256(`omp-appliance-qualification-request:reuse:${randomUUID()}`),
 				}),
 			});
-			if (!safeString(second.id) || !extractOutputText(second)) throw new Error("reuse-failed");
+			const usage = responseUsage(second.response);
+			if (!safeString(second.response.id) || !extractOutputText(second.response)) throw new Error("reuse-failed");
+			if (!usage || usage.inputTokens <= 0) throw new Error("missing-reuse-usage");
+			coldTtftMs = first.ttftMs;
+			warmTtftMs = second.ttftMs;
+			prefixReusePercent = Math.round((usage.cachedTokens / usage.inputTokens) * 100_000) / 1_000;
 			return JSON.stringify({ first: true, continuation: true });
 		});
 		const cases = [toolCase, decodeCase, reuseCase];
-		return { ok: cases.every(result => result.ok), cases };
+		const metrics =
+			coldTtftMs !== undefined &&
+			warmTtftMs !== undefined &&
+			prefixReusePercent !== undefined &&
+			decodeTokensPerSecond !== undefined
+				? { coldTtftMs, warmTtftMs, prefixReusePercent, decodeTokensPerSecond }
+				: undefined;
+		return { ok: cases.every(result => result.ok), cases, metrics };
 	}
 
 	async probeRoutedRequest(installation: ApplianceInstallation, secret: string): Promise<void> {

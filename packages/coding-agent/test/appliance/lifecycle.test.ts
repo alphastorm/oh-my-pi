@@ -208,6 +208,7 @@ class FakePlatform implements AppliancePlatform {
 				{ name: "short-decode", ok: this.qualificationOk, durationMs: 2, oracleSha256: "5".repeat(64) },
 				{ name: "long-prefill-reuse", ok: this.qualificationOk, durationMs: 3, oracleSha256: "6".repeat(64) },
 			],
+			metrics: this.qualificationMetrics,
 		};
 	}
 
@@ -233,6 +234,12 @@ class FakePlatform implements AppliancePlatform {
 			powerProfile: "performance",
 		};
 	}
+	qualificationMetrics: ApplianceQuickQualification["metrics"] = {
+		coldTtftMs: 1_200,
+		warmTtftMs: 80,
+		prefixReusePercent: 99.5,
+		decodeTokensPerSecond: 209.038,
+	};
 }
 
 function bodyIsInstallation(target: ApplianceCandidate | ApplianceInstallation): target is ApplianceInstallation {
@@ -557,5 +564,77 @@ describe("appliance lifecycle", () => {
 			sessionsResident: 2,
 			mtpDepth: 3,
 		});
+	});
+
+	it("emits a redacted support bundle from existing appliance evidence", async () => {
+		const { lifecycle, store, profile } = harness();
+		store.state = {
+			...emptyState(),
+			revision: 2,
+			active: installation("active", profile, "secrets/private-active.key", 8000),
+			lastRollbackReceiptId: "private-rollback-receipt-id",
+		};
+		store.secrets.set("secrets/private-active.key", "super-secret-active");
+		const before = structuredClone(store.state);
+
+		const receipt = await lifecycle.supportBundle();
+
+		expect(receipt).toMatchObject({
+			action: "support-bundle",
+			status: "ok",
+			details: {
+				gpuModel: "NVIDIA RTX 5090",
+				os: "linux",
+				driver: "999.1",
+				runtimeRelease: "v0.1.0-qwen38-5090",
+				modelSha256: MODEL_SHA,
+				profile: "rtx5090-linux",
+				context: 131072,
+				verdicts: { protocol: true, tools: true, rollback: "passed" },
+				metrics: {
+					coldTtftMs: 1_200,
+					warmTtftMs: 80,
+					prefixReusePercent: 99.5,
+					decodeTokensPerSecond: 209.038,
+				},
+				blockers: [],
+			},
+		});
+		expect(store.state).toEqual(before);
+		expect(store.receiptWrites).toBe(1);
+		const encoded = JSON.stringify(receipt);
+		for (const sensitive of [
+			"super-secret-active",
+			"secrets/private-active.key",
+			"private-rollback-receipt-id",
+			"3".repeat(64),
+		]) {
+			expect(encoded).not.toContain(sensitive);
+		}
+	});
+
+	it("blocks an incomplete support bundle without fabricating measurements", async () => {
+		const { lifecycle, store } = harness();
+
+		const receipt = await lifecycle.supportBundle();
+
+		expect(receipt.status).toBe("blocked");
+		expect(receipt.details).toMatchObject({
+			runtimeRelease: null,
+			modelSha256: null,
+			profile: null,
+			context: null,
+			verdicts: { protocol: null, tools: null, rollback: null },
+			metrics: {
+				coldTtftMs: null,
+				warmTtftMs: null,
+				prefixReusePercent: null,
+				decodeTokensPerSecond: null,
+			},
+			blockers: ["No active appliance route"],
+		});
+		expect(store.stateWrites).toBe(0);
+		expect(store.receiptWrites).toBe(1);
+		expect(store.secretWrites).toBe(0);
 	});
 });

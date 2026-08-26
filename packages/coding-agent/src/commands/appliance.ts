@@ -6,7 +6,7 @@ import { FileApplianceStore } from "../appliance/store";
 import type { ApplianceAction, ApplianceGpuSelector, ApplianceReceipt } from "../appliance/types";
 import { applianceHelp as commandHelp } from "../cli/command-help";
 
-const ACTIONS: ApplianceAction[] = ["doctor", "plan", "install", "status", "benchmark", "rollback"];
+const ACTIONS: ApplianceAction[] = ["doctor", "plan", "install", "status", "benchmark", "rollback", "support-bundle"];
 const GPU_SELECTORS: ApplianceGpuSelector[] = ["auto", "rtx5090", "rtx4090"];
 function isApplianceAction(value: string | undefined): value is ApplianceAction {
 	return value !== undefined && ACTIONS.some(action => action === value);
@@ -88,8 +88,11 @@ export default class Appliance extends Command {
 			case "rollback":
 				receipt = await lifecycle.rollback();
 				break;
+			case "support-bundle":
+				receipt = await lifecycle.supportBundle();
+				break;
 		}
-		writeReceipt(receipt, Boolean(flags.json));
+		writeReceipt(receipt, action === "support-bundle" || Boolean(flags.json));
 		if (receipt.status === "failed" || (receipt.status === "blocked" && action !== "doctor" && action !== "plan")) {
 			process.exitCode = 1;
 		}

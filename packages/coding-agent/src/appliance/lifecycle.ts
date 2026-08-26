@@ -109,6 +109,13 @@ function planCommands(profile: ApplianceProfile): string[] {
 	];
 }
 
+function supportMetric(value: number | undefined, maximum?: number): number | null {
+	if (value === undefined || !Number.isFinite(value) || value < 0 || (maximum !== undefined && value > maximum)) {
+		return null;
+	}
+	return value;
+}
+
 export class ApplianceLifecycle {
 	readonly #store: ApplianceStore;
 	readonly #platform: AppliancePlatform;
@@ -432,6 +439,7 @@ export class ApplianceLifecycle {
 				release: state.active.release,
 				quick: true,
 				cases: qualification.cases,
+				metrics: qualification.metrics,
 			});
 			await this.#store.writeReceipt(receipt);
 			return receipt;
@@ -641,5 +649,56 @@ export class ApplianceLifecycle {
 			timestamp: this.#now().toISOString(),
 			details,
 		};
+	}
+
+	async supportBundle(): Promise<ApplianceReceipt> {
+		const [host, state] = await Promise.all([this.#platform.inspectHost(), this.#store.readState()]);
+		const active = state.active;
+		const profile = active ? this.#profiles.find(candidate => candidate.profile === active.profile) : undefined;
+		const blockers: string[] = [];
+		let qualification: Awaited<ReturnType<AppliancePlatform["quickQualification"]>> | undefined;
+		if (!active) {
+			blockers.push("No active appliance route");
+		} else {
+			try {
+				const secret = await this.#store.readSecret(active.route.secretRef);
+				qualification = await this.#platform.quickQualification(active, secret);
+				if (!qualification.ok) blockers.push("Quick qualification failed");
+			} catch {
+				blockers.push("Quick qualification could not reach the authenticated appliance");
+			}
+		}
+
+		const protocolTool = qualification?.cases.find(testCase => testCase.name === "protocol-tool")?.ok ?? null;
+		const metrics = {
+			coldTtftMs: supportMetric(qualification?.metrics?.coldTtftMs),
+			warmTtftMs: supportMetric(qualification?.metrics?.warmTtftMs),
+			prefixReusePercent: supportMetric(qualification?.metrics?.prefixReusePercent, 100),
+			decodeTokensPerSecond: supportMetric(qualification?.metrics?.decodeTokensPerSecond),
+		};
+		if (active && Object.values(metrics).some(value => value === null)) {
+			blockers.push("Quick qualification does not expose all support-bundle performance metrics");
+		}
+		const rollback = state.lastRollbackReceiptId ? "passed" : null;
+		if (active && rollback === null) blockers.push("No successful rollback receipt is recorded");
+
+		const receipt = this.#receipt("support-bundle", blockers.length === 0 ? "ok" : "blocked", {
+			gpuModel: host.gpus[0]?.model ?? null,
+			os: host.os,
+			driver: host.nvidiaDriver ?? null,
+			runtimeRelease: active?.release ?? null,
+			modelSha256: active?.modelSha256 ?? null,
+			profile: active?.profile ?? null,
+			context: profile?.contextWindow ?? null,
+			verdicts: {
+				protocol: protocolTool,
+				tools: protocolTool,
+				rollback,
+			},
+			metrics,
+			blockers,
+		});
+		await this.#store.writeReceipt(receipt);
+		return receipt;
 	}
 }

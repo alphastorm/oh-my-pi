@@ -55,7 +55,7 @@ export const APPLIANCE_PROFILES: readonly ApplianceProfile[] = [
 		speculation: "none",
 		concurrency: 1,
 		protocol: "openai-responses",
-		capabilities: ["tools", "reasoning", "thinking-history", "durable-checkpoint"],
+		capabilities: ["tools", "reasoning", "thinking-history", "stateful-responses", "durable-checkpoint"],
 		servedModel: "q38-ninfer",
 		aliases: ["local-max", "local-fast", "local-batch", "qwen38-4090"],
 		defaultPort: 8000,

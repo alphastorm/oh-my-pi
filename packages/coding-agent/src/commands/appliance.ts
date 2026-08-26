@@ -1,19 +1,45 @@
+import type { NInferCheckpointOperation } from "@oh-my-pi/pi-ai/providers/ninfer";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
 import { Args, CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { ApplianceLifecycle } from "../appliance/lifecycle";
 import { LocalAppliancePlatform } from "../appliance/platform";
 import { FileApplianceStore } from "../appliance/store";
-import type { ApplianceAction, ApplianceGpuSelector, ApplianceReceipt } from "../appliance/types";
+import type {
+	ApplianceAction,
+	ApplianceGpuSelector,
+	ApplianceProfileId,
+	ApplianceReceipt,
+} from "../appliance/types";
 import { applianceHelp as commandHelp } from "../cli/command-help";
 
-const ACTIONS: ApplianceAction[] = ["doctor", "plan", "install", "status", "benchmark", "rollback", "support-bundle"];
+const ACTIONS: ApplianceAction[] = [
+	"doctor",
+	"plan",
+	"install",
+	"status",
+	"benchmark",
+	"checkpoint",
+	"rollback",
+	"support-bundle",
+];
 const GPU_SELECTORS: ApplianceGpuSelector[] = ["auto", "rtx5090", "rtx4090"];
+const CHECKPOINT_OPERATIONS: NInferCheckpointOperation[] = ["save", "status", "delete"];
+const PROFILE_IDS: ApplianceProfileId[] = ["rtx5090-linux", "rtx4090-windows"];
+
 function isApplianceAction(value: string | undefined): value is ApplianceAction {
 	return value !== undefined && ACTIONS.some(action => action === value);
 }
 
 function isGpuSelector(value: string | undefined): value is ApplianceGpuSelector {
 	return value !== undefined && GPU_SELECTORS.some(selector => selector === value);
+}
+
+function isCheckpointOperation(value: string | undefined): value is NInferCheckpointOperation {
+	return value !== undefined && CHECKPOINT_OPERATIONS.some(operation => operation === value);
+}
+
+function isProfileId(value: string | undefined): value is ApplianceProfileId {
+	return value !== undefined && PROFILE_IDS.some(profile => profile === value);
 }
 
 function writeReceipt(receipt: ApplianceReceipt, json: boolean): void {
@@ -35,7 +61,10 @@ export default class Appliance extends Command {
 	static description = commandHelp.description;
 	static args = {
 		action: Args.string({ description: "Appliance action", required: true, options: ACTIONS }),
-		model: Args.string({ description: "Model family (qwen3.8 for plan/install)", required: false }),
+		model: Args.string({
+			description: "Model family (plan/install) or checkpoint operation (save/status/delete)",
+			required: false,
+		}),
 	};
 
 	static flags = {
@@ -43,6 +72,8 @@ export default class Appliance extends Command {
 		port: Flags.integer({ description: "Candidate loopback port" }),
 		quick: Flags.boolean({ description: "Run the bounded quick qualification" }),
 		json: Flags.boolean({ description: "Emit only the machine-readable receipt" }),
+		"session-sha256": Flags.string({ description: "Lowercase SHA-256 of the OMP session identity" }),
+		profile: Flags.string({ description: "Installed checkpoint-capable profile", options: PROFILE_IDS }),
 	};
 
 	async run(): Promise<void> {
@@ -60,7 +91,17 @@ export default class Appliance extends Command {
 		if (action === "benchmark" && !flags.quick) {
 			throw new CliUsageError("appliance benchmark requires --quick");
 		}
-		if (!["plan", "install"].includes(action) && args.model) {
+		if (action === "checkpoint") {
+			if (!isCheckpointOperation(args.model)) {
+				throw new CliUsageError("appliance checkpoint requires save, status, or delete");
+			}
+			if (!flags["session-sha256"] || !/^[0-9a-f]{64}$/.test(flags["session-sha256"])) {
+				throw new CliUsageError("appliance checkpoint requires --session-sha256 with a lowercase SHA-256");
+			}
+			if (flags.profile !== undefined && !isProfileId(flags.profile)) {
+				throw new CliUsageError("Unknown appliance checkpoint profile");
+			}
+		} else if (!["plan", "install"].includes(action) && args.model) {
 			throw new CliUsageError(`${action} does not accept a model argument`);
 		}
 		const agentDir = getAgentDir();
@@ -84,6 +125,13 @@ export default class Appliance extends Command {
 				break;
 			case "benchmark":
 				receipt = await lifecycle.benchmark(Boolean(flags.quick));
+				break;
+			case "checkpoint":
+				receipt = await lifecycle.checkpoint(
+					args.model as NInferCheckpointOperation,
+					flags["session-sha256"]!,
+					flags.profile as ApplianceProfileId | undefined,
+				);
 				break;
 			case "rollback":
 				receipt = await lifecycle.rollback();

@@ -7,6 +7,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import {
+	fetchNInferStatus,
+	requestNInferCheckpoint,
+	type NInferCheckpointOperation,
+	type NInferCheckpointStatus,
+} from "@oh-my-pi/pi-ai/providers/ninfer";
 import type {
 	ApplianceAsset,
 	ApplianceBenchmarkCase,
@@ -648,6 +654,21 @@ export class LocalAppliancePlatform implements AppliancePlatform {
 		return this.#fetchStatus(installation, secret);
 	}
 
+	async checkpoint(
+		installation: ApplianceInstallation,
+		secret: string,
+		operation: NInferCheckpointOperation,
+		sessionSha256: string,
+	): Promise<NInferCheckpointStatus> {
+		return requestNInferCheckpoint({
+			operation,
+			sessionSha256,
+			baseUrl: installation.route.baseUrl,
+			apiKey: secret,
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+		});
+	}
+
 	#artifactRef(asset: ApplianceAsset): string {
 		return path.join("artifacts", asset.kind, asset.sha256);
 	}
@@ -757,19 +778,11 @@ export class LocalAppliancePlatform implements AppliancePlatform {
 		target: ApplianceCandidate | ApplianceInstallation,
 		secret: string,
 	): Promise<ApplianceEndpointStatus> {
-		const raw = await fetchJson(`${endpointFor(target)}/v1/ninfer/status`, {
-			method: "GET",
-			headers: authHeaders(secret),
+		return fetchNInferStatus({
+			baseUrl: `${endpointFor(target)}/v1`,
+			apiKey: secret,
+			servedModel: servedModelFor(target) ?? "q38-ninfer",
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 		});
-		return {
-			schemaVersion: safeNumber(raw.schema_version),
-			deploymentProfile: safeString(raw.deployment_profile),
-			servedModel: safeString(raw.served_model),
-			sessionsResident: safeNumber(raw.sessions_resident),
-			queueDepth: safeNumber(raw.queue_depth),
-			cacheUtilization: safeNumber(raw.cache_utilization),
-			mtpDepth: safeNumber(raw.mtp_depth),
-			powerProfile: safeString(raw.power_profile),
-		};
 	}
 }

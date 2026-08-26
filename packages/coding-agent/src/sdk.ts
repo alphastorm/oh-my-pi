@@ -563,6 +563,10 @@ export interface CreateAgentSessionOptions {
 	requireYieldTool?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
+	/** Allow an unavailable warm NInfer session to full-replay on another local appliance. Default: false. */
+	applianceColdLocalFallback?: boolean;
+	/** Prefer keeping RTX 5090 capacity for foreground work. Default: true. */
+	applianceForegroundReservation?: boolean;
 	/** Parent Hindsight state to alias for subagent memory tools. */
 	parentHindsightSessionState?: HindsightSessionState;
 	/** Parent Mnemopi state to alias for subagent memory tools. */
@@ -1317,6 +1321,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		extensionRoots?.configured ?? settings.get("extensions") ?? [],
 		extensionRoots?.configuredLevel ?? settings.extensionsSourceLevel(),
 	);
+	const sessionManager =
+		options.sessionManager ??
+		logger.time("sessionManager", () =>
+			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
+		);
 
 	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
 	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
@@ -1331,7 +1340,40 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cacheDbPath: getModelDbPath(agentDir),
 			},
 		);
-	if (!options.modelRegistry) await registerActiveApplianceRoute(modelRegistry, settings, agentDir);
+	if (!options.modelRegistry) {
+		const requestedPattern = Array.isArray(options.modelPattern) ? options.modelPattern[0] : options.modelPattern;
+		const requestedId = options.model?.id ?? requestedPattern?.trim().split("/").at(-1)?.split(":")[0];
+		const requestedAlias =
+			requestedId && /^(?:local-(?:max|fast|batch)|qwen38-(?:5090|4090))$/.test(requestedId)
+				? requestedId
+				: undefined;
+		const backgroundPlacement =
+			requestedAlias === "local-batch" ||
+			(options.taskDepth ?? 0) > 0 ||
+			Boolean(options.parentTaskPrefix) ||
+			options.restrictToolNames === true ||
+			/librarian|background|batch/i.test(`${options.agentId ?? ""} ${options.agentDisplayName ?? ""}`);
+		const registration = await registerActiveApplianceRoute(modelRegistry, settings, agentDir, {
+			placement: backgroundPlacement ? "background" : "foreground",
+			requestedAlias,
+			vision: requestedAlias ? options.model?.input.includes("image") : false,
+			coldLocalFallback:
+				options.applianceColdLocalFallback ?? settings.get("appliance.coldLocalFallback"),
+			foregroundReservation:
+				options.applianceForegroundReservation ?? settings.get("appliance.foregroundReservation"),
+			sessionManager,
+			sessionId: options.providerSessionId ?? sessionManager.getSessionId(),
+		});
+		if (registration) {
+			logger.debug("Selected local NInfer appliance route", {
+				profile: registration.profile,
+				placement: registration.placement,
+				reason: registration.reason,
+				fallbackReason: registration.fallbackReason,
+				endpointFingerprint: registration.endpointFingerprint,
+			});
+		}
+	}
 	// Track whether we internally created the authStorage so we can close it
 	// if construction fails before the session takes ownership.
 	const ownsAuthStorage = !options.authStorage && !options.modelRegistry;
@@ -1420,11 +1462,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Initialize provider preferences from settings
 	applyProviderGlobalsFromSettings(settings);
 
-	const sessionManager =
-		options.sessionManager ??
-		logger.time("sessionManager", () =>
-			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
-		);
 	const configuredDirs = options.additionalDirectories
 		? options.additionalDirectories
 		: settings.get("workspace.additionalDirectories");

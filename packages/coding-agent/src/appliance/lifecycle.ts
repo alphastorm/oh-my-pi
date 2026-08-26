@@ -1,3 +1,4 @@
+import type { NInferCheckpointOperation } from "@oh-my-pi/pi-ai/providers/ninfer";
 import { randomUUID } from "node:crypto";
 import {
 	APPLIANCE_PROFILES,
@@ -8,6 +9,7 @@ import {
 import {
 	APPLIANCE_RECEIPT_SCHEMA_VERSION,
 	type ApplianceCandidate,
+	type ApplianceEndpointStatus,
 	type ApplianceGpuSelector,
 	type ApplianceHostFacts,
 	type ApplianceInstallation,
@@ -15,6 +17,7 @@ import {
 	type AppliancePlan,
 	type AppliancePlatform,
 	type ApplianceProfile,
+	type ApplianceProfileId,
 	type ApplianceReceipt,
 	type ApplianceState,
 	type ApplianceStore,
@@ -116,6 +119,27 @@ function supportMetric(value: number | undefined, maximum?: number): number | nu
 	return value;
 }
 
+function publicEndpointStatus(endpoint: ApplianceEndpointStatus): Record<string, unknown> {
+	return {
+		reachable: true,
+		identity: {
+			endpointFingerprint: endpoint.fingerprint,
+			deploymentProfile: endpoint.profile,
+			servedModel: endpoint.servedModel,
+			upstreamBaseSha: endpoint.status.upstreamBaseSha,
+			patchStackSha: endpoint.status.patchStackSha,
+			binarySha256: endpoint.status.binarySha256,
+			artifactSha256: endpoint.artifactSha256,
+			configSha256: endpoint.status.configSha256,
+			sourceDirty: endpoint.status.sourceDirty,
+		},
+		maxContext: endpoint.status.maxContext,
+		scheduler: endpoint.status.scheduler,
+		cache: endpoint.status.cache,
+		mtp: endpoint.status.mtp,
+	};
+}
+
 export class ApplianceLifecycle {
 	readonly #store: ApplianceStore;
 	readonly #platform: AppliancePlatform;
@@ -154,7 +178,7 @@ export class ApplianceLifecycle {
 		if (state.active) {
 			try {
 				const secret = await this.#store.readSecret(state.active.route.secretRef);
-				endpoint = { reachable: true, ...(await this.#platform.readEndpointStatus(state.active, secret)) };
+				endpoint = publicEndpointStatus(await this.#platform.readEndpointStatus(state.active, secret));
 			} catch {
 				endpoint = { reachable: false };
 			}
@@ -163,6 +187,9 @@ export class ApplianceLifecycle {
 			...detected.blockers,
 			...(detected.profile?.availability.blockers ?? []),
 			...(occupied && state.active?.route.port !== port ? [`Port ${port} is occupied`] : []),
+			...(state.active && endpoint?.reachable !== true
+				? ["Active appliance endpoint is unreachable or failed identity validation"]
+				: []),
 		];
 		return this.#receipt("doctor", blockers.length === 0 ? "ok" : "blocked", {
 			host: publicHost(host),
@@ -338,6 +365,7 @@ export class ApplianceLifecycle {
 						schemaVersion: state.schemaVersion,
 						revision: state.revision + 1,
 						active: installation,
+						fleet: state.fleet,
 						rollbackTarget: state.active,
 						lastInstallReceiptId: prepared.receiptId,
 						lastRollbackReceiptId: state.lastRollbackReceiptId,
@@ -399,15 +427,21 @@ export class ApplianceLifecycle {
 	async status(): Promise<ApplianceReceipt> {
 		const state = await this.#store.readState();
 		if (!state.active) {
-			return this.#receipt("status", "ok", { installed: false, rollbackAvailable: false });
+			return this.#receipt("status", "ok", { installed: false, rollbackAvailable: false, fleet: [] });
 		}
-		let endpoint: Record<string, unknown> = { reachable: false };
-		try {
-			const secret = await this.#store.readSecret(state.active.route.secretRef);
-			const status = await this.#platform.readEndpointStatus(state.active, secret);
-			endpoint = { reachable: true, ...status };
-		} catch {}
-		return this.#receipt("status", "ok", {
+		const installations = [state.active, ...(state.fleet ?? [])];
+		const endpoints = await Promise.all(
+			installations.map(async installation => {
+				try {
+					const secret = await this.#store.readSecret(installation.route.secretRef);
+					return { profile: installation.profile, endpoint: publicEndpointStatus(await this.#platform.readEndpointStatus(installation, secret)) };
+				} catch {
+					return { profile: installation.profile, endpoint: { reachable: false } };
+				}
+			}),
+		);
+		const allReachable = endpoints.every(item => item.endpoint.reachable === true);
+		return this.#receipt("status", allReachable ? "ok" : "failed", {
 			installed: true,
 			stateRevision: state.revision,
 			active: {
@@ -419,7 +453,8 @@ export class ApplianceLifecycle {
 				port: state.active.route.port,
 				aliases: state.active.route.aliases,
 			},
-			endpoint,
+			endpoint: endpoints[0]?.endpoint ?? { reachable: false },
+			fleet: endpoints,
 			rollback: state.rollbackTarget
 				? { available: true, profile: state.rollbackTarget.profile, release: state.rollbackTarget.release }
 				: { available: false },
@@ -454,6 +489,66 @@ export class ApplianceLifecycle {
 		}
 	}
 
+
+	async checkpoint(
+		operation: NInferCheckpointOperation,
+		sessionSha256: string,
+		profileId?: ApplianceProfileId,
+	): Promise<ApplianceReceipt> {
+		const state = await this.#store.readState();
+		const installations = state.active ? [state.active, ...(state.fleet ?? [])] : [];
+		const installation = profileId
+			? installations.find(candidate => candidate.profile === profileId)
+			: installations.find(candidate =>
+					this.#profiles
+						.find(profile => profile.profile === candidate.profile)
+						?.capabilities.includes("durable-checkpoint"),
+				);
+		const profile = installation
+			? this.#profiles.find(candidate => candidate.profile === installation.profile)
+			: undefined;
+		if (!installation || !profile || !profile.capabilities.includes("durable-checkpoint")) {
+			const receipt = this.#receipt("checkpoint", "blocked", {
+				operation,
+				sessionSha256,
+				profile: profileId,
+				blocker: "No configured appliance profile exposes durable checkpoints",
+			});
+			await this.#store.writeReceipt(receipt);
+			return receipt;
+		}
+		try {
+			const secret = await this.#store.readSecret(installation.route.secretRef);
+			const result = await this.#platform.checkpoint(installation, secret, operation, sessionSha256);
+			const receiptStatus =
+				result.state === "disabled"
+					? "blocked"
+					: result.state === "incompatible" || result.state === "corrupt"
+						? "failed"
+						: "ok";
+			const receipt = this.#receipt("checkpoint", receiptStatus, {
+				operation,
+				sessionSha256,
+				profile: installation.profile,
+				state: result.state,
+				bytes: result.bytes,
+				frontierTokens: result.frontierTokens,
+				restoredTokens: result.restoredTokens,
+				responseRecords: result.responseRecords,
+			});
+			await this.#store.writeReceipt(receipt);
+			return receipt;
+		} catch {
+			const receipt = this.#receipt("checkpoint", "failed", {
+				operation,
+				sessionSha256,
+				profile: installation.profile,
+				failureStage: "authenticated-checkpoint-request",
+			});
+			await this.#store.writeReceipt(receipt);
+			return receipt;
+		}
+	}
 	async rollback(): Promise<ApplianceReceipt> {
 		return this.#store.withInstallLock(async () => {
 			const state = await this.#store.readState();
@@ -475,6 +570,7 @@ export class ApplianceLifecycle {
 					schemaVersion: state.schemaVersion,
 					revision: state.revision + 1,
 					active: incumbent,
+					fleet: state.fleet,
 					rollbackTarget: candidate,
 					lastInstallReceiptId: state.lastInstallReceiptId,
 					lastRollbackReceiptId: state.lastRollbackReceiptId,

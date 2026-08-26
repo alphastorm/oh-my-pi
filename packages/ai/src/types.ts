@@ -331,6 +331,23 @@ export function coerceServiceTierByFamily(value: unknown): ServiceTierByFamily |
 
 export type ProviderStateRecovery = "full_replay";
 
+export type NInferAffinityFallbackReason =
+	| "endpoint_identity_changed"
+	| "stale_previous_response_id"
+	| "warm_owner_unavailable";
+
+/** Redacted, content-bound placement receipt for a warm local NInfer session. */
+export interface NInferSessionAffinity {
+	schemaVersion: 1;
+	sessionSha256: string;
+	endpointFingerprint: string;
+	profile: string;
+	model: string;
+	artifactSha256: string;
+	lastSuccessAt: string;
+	fallbackReason?: NInferAffinityFallbackReason;
+}
+
 /** Provider-owned logical acceleration state waiting for transcript publication. */
 export interface ProviderStatePersistenceSnapshot {
 	schemaVersion: 1;
@@ -345,7 +362,9 @@ export interface ProviderStatePersistenceSnapshot {
 	requestShapeVersion: string;
 	promptCacheBreakpointPolicy?: "latest-stable-message" | "none";
 	providerStateRecovery?: ProviderStateRecovery;
+	ninferAffinity?: NInferSessionAffinity;
 }
+
 
 export interface ProviderStatePersistenceSelection {
 	provider: string;

@@ -1,9 +1,23 @@
+import type {
+	NInferCheckpointOperation,
+	NInferCheckpointStatus,
+	NInferEndpointIdentity,
+} from "@oh-my-pi/pi-ai/providers/ninfer";
+
 export const APPLIANCE_STATE_SCHEMA_VERSION = 1 as const;
 export const APPLIANCE_RECEIPT_SCHEMA_VERSION = 1 as const;
 
 export type ApplianceProfileId = "rtx5090-linux" | "rtx4090-windows";
 export type ApplianceGpuSelector = "auto" | "rtx5090" | "rtx4090";
-export type ApplianceAction = "doctor" | "plan" | "install" | "status" | "benchmark" | "rollback" | "support-bundle";
+export type ApplianceAction =
+	| "doctor"
+	| "plan"
+	| "install"
+	| "status"
+	| "benchmark"
+	| "checkpoint"
+	| "rollback"
+	| "support-bundle";
 export type ApplianceCapability =
 	| "tools"
 	| "reasoning"
@@ -106,6 +120,7 @@ export interface ApplianceState {
 	schemaVersion: typeof APPLIANCE_STATE_SCHEMA_VERSION;
 	revision: number;
 	active?: ApplianceInstallation;
+	fleet?: ApplianceInstallation[];
 	rollbackTarget?: ApplianceInstallation;
 	lastInstallReceiptId?: string;
 	lastRollbackReceiptId?: string;
@@ -136,16 +151,7 @@ export interface ApplianceCandidate {
 	endpoint: string;
 	port: number;
 }
-export interface ApplianceEndpointStatus {
-	schemaVersion?: number;
-	deploymentProfile?: string;
-	servedModel?: string;
-	sessionsResident?: number;
-	queueDepth?: number;
-	cacheUtilization?: number;
-	mtpDepth?: number;
-	powerProfile?: string;
-}
+export type ApplianceEndpointStatus = NInferEndpointIdentity;
 
 export interface AppliancePlan {
 	profile?: ApplianceProfile;
@@ -208,4 +214,10 @@ export interface AppliancePlatform {
 	): Promise<ApplianceQuickQualification>;
 	probeRoutedRequest(installation: ApplianceInstallation, secret: string): Promise<void>;
 	readEndpointStatus(installation: ApplianceInstallation, secret: string): Promise<ApplianceEndpointStatus>;
+	checkpoint(
+		installation: ApplianceInstallation,
+		secret: string,
+		operation: NInferCheckpointOperation,
+		sessionSha256: string,
+	): Promise<NInferCheckpointStatus>;
 }

@@ -667,6 +667,9 @@ export const SETTINGS_SCHEMA = {
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
 
 	modelProviderOrder: { type: "array", default: EMPTY_STRING_ARRAY },
+	"appliance.coldLocalFallback": { type: "boolean", default: false },
+
+	"appliance.foregroundReservation": { type: "boolean", default: true },
 
 	cycleOrder: { type: "array", default: DEFAULT_CYCLE_ORDER },
 

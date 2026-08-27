@@ -136,7 +136,11 @@ class FakePlatform implements AppliancePlatform {
 	events: string[] = [];
 	onRoutedRequest?: (installation: ApplianceInstallation) => void;
 	failEndpointStatus = false;
-	checkpointCalls: Array<{ operation: NInferCheckpointOperation; sessionSha256: string }> = [];
+	checkpointCalls: Array<{
+		installationId: string;
+		operation: NInferCheckpointOperation;
+		sessionSha256: string;
+	}> = [];
 
 	async inspectHost(): Promise<ApplianceHostFacts> {
 		return structuredClone(this.host);
@@ -265,12 +269,12 @@ class FakePlatform implements AppliancePlatform {
 	}
 
 	async checkpoint(
-		_installation: ApplianceInstallation,
+		installation: ApplianceInstallation,
 		_secret: string,
 		operation: NInferCheckpointOperation,
 		sessionSha256: string,
 	): Promise<NInferCheckpointStatus> {
-		this.checkpointCalls.push({ operation, sessionSha256 });
+		this.checkpointCalls.push({ installationId: installation.installationId, operation, sessionSha256 });
 		return {
 			artifactType: "ninfer_session_checkpoint_status",
 			schemaVersion: 1,
@@ -324,7 +328,7 @@ function installation(id: string, profile: ApplianceProfile, secretRef: string, 
 	};
 }
 
-function harness(profile = installableProfile()) {
+function harness(profile = installableProfile(), profiles: readonly ApplianceProfile[] = [profile]) {
 	const store = new MemoryStore();
 	const platform = new FakePlatform();
 	const logger = new CapturingLogger();
@@ -332,7 +336,7 @@ function harness(profile = installableProfile()) {
 	const lifecycle = new ApplianceLifecycle({
 		store,
 		platform,
-		profiles: [profile],
+		profiles,
 		logger,
 		now: () => new Date("2026-08-26T00:00:00.000Z"),
 		newId: () => `id-${++id}`,
@@ -412,10 +416,50 @@ describe("appliance lifecycle", () => {
 			status: "ok",
 			details: { operation: "save", sessionSha256, state: "available", bytes: 4096 },
 		});
-		expect(platform.checkpointCalls).toEqual([{ operation: "save", sessionSha256 }]);
+		expect(platform.checkpointCalls).toEqual([{ installationId: "active", operation: "save", sessionSha256 }]);
 		expect(JSON.stringify(receipt)).not.toContain("super-secret-checkpoint");
 		expect(JSON.stringify(receipt)).not.toContain("baseUrl");
 		expect(store.receiptWrites).toBe(1);
+	});
+
+	it("requires an explicit profile when multiple appliances expose durable checkpoints", async () => {
+		const checkpointBase = installableProfile();
+		const primary: ApplianceProfile = {
+			...checkpointBase,
+			capabilities: [...checkpointBase.capabilities, "durable-checkpoint"],
+		};
+		const secondary: ApplianceProfile = {
+			...primary,
+			profile: "rtx4090-windows",
+			aliases: ["local-fast", "local-batch", "qwen38-4090"],
+		};
+		const { lifecycle, store, platform } = harness(primary, [primary, secondary]);
+		store.state = {
+			...emptyState(),
+			revision: 1,
+			active: installation("active", primary, "secret-active", 8000),
+			fleet: [installation("fleet", secondary, "secret-fleet", 8001)],
+		};
+		store.secrets.set("secret-active", "secret-primary");
+		store.secrets.set("secret-fleet", "secret-secondary");
+		const sessionSha256 = "7".repeat(64);
+
+		const ambiguous = await lifecycle.checkpoint("status", sessionSha256);
+
+		expect(ambiguous).toMatchObject({
+			status: "blocked",
+			details: {
+				blocker: "Multiple appliance profiles expose durable checkpoints; specify --profile",
+			},
+		});
+		expect(platform.checkpointCalls).toEqual([]);
+
+		const selected = await lifecycle.checkpoint("status", sessionSha256, "rtx4090-windows");
+
+		expect(selected.status).toBe("ok");
+		expect(platform.checkpointCalls).toEqual([
+			{ installationId: "fleet", operation: "status", sessionSha256 },
+		]);
 	});
 
 	it("installs once, switches the route atomically, and remains idempotent", async () => {
@@ -587,6 +631,8 @@ describe("appliance lifecycle", () => {
 		expect(receipt.status).toBe("rolled-back");
 		expect(store.state.active?.installationId).toBe("incumbent");
 		expect(store.state.rollbackTarget?.installationId).toBe("candidate");
+		expect(store.state.lastRollbackReceiptId).toBe(receipt.receiptId);
+		expect(store.state.revision).toBe(9);
 		expect(platform.events).toEqual([
 			"incumbent:start:incumbent",
 			"health:incumbent",

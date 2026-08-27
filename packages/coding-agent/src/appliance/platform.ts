@@ -120,9 +120,33 @@ function authHeaders(secret: string): Record<string, string> {
 async function fetchJson(url: string, init: RequestInit): Promise<Record<string, unknown>> {
 	const response = await fetch(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
 	if (!response.ok) throw new Error(`Appliance endpoint returned HTTP ${response.status}`);
-	const value: unknown = await response.json();
+	const value: unknown = JSON.parse(await readBoundedResponseText(response, COMMAND_OUTPUT_LIMIT));
 	if (!isRecord(value)) throw new Error("Appliance endpoint returned invalid JSON");
 	return value;
+}
+
+async function readBoundedResponseText(response: Response, limit: number): Promise<string> {
+	const contentLength = Number(response.headers.get("content-length"));
+	if (Number.isFinite(contentLength) && contentLength > limit) {
+		await response.body?.cancel().catch(() => {});
+		throw new Error("Appliance response exceeded the size limit");
+	}
+	if (!response.body) return "";
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let text = "";
+	let bytes = 0;
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		bytes += value.byteLength;
+		if (bytes > limit) {
+			await reader.cancel().catch(() => {});
+			throw new Error("Appliance response exceeded the size limit");
+		}
+		text += decoder.decode(value, { stream: true });
+	}
+	return text + decoder.decode();
 }
 
 interface ResponsesStreamMeasurement {
@@ -143,6 +167,7 @@ async function fetchResponsesStream(url: string, init: RequestInit): Promise<Res
 	let firstTokenAt: number | undefined;
 	let completedAt: number | undefined;
 	let completed: Record<string, unknown> | undefined;
+	let bytes = 0;
 	const consume = (block: string): void => {
 		const data = block
 			.split("\n")
@@ -175,9 +200,13 @@ async function fetchResponsesStream(url: string, init: RequestInit): Promise<Res
 
 	while (true) {
 		const { done, value } = await reader.read();
+		bytes += value?.byteLength ?? 0;
+		if (bytes > COMMAND_OUTPUT_LIMIT) {
+			await reader.cancel().catch(() => {});
+			throw new Error("Appliance response stream exceeded the size limit");
+		}
 		buffer += decoder.decode(value, { stream: !done });
 		buffer = buffer.replaceAll("\r\n", "\n");
-		if (buffer.length > COMMAND_OUTPUT_LIMIT) throw new Error("Appliance response stream exceeded the size limit");
 		let boundary = buffer.indexOf("\n\n");
 		while (boundary >= 0) {
 			consume(buffer.slice(0, boundary));

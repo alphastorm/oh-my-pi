@@ -497,22 +497,28 @@ export class ApplianceLifecycle {
 	): Promise<ApplianceReceipt> {
 		const state = await this.#store.readState();
 		const installations = state.active ? [state.active, ...(state.fleet ?? [])] : [];
+		const checkpointInstallations = installations.filter(candidate =>
+			this.#profiles
+				.find(profile => profile.profile === candidate.profile)
+				?.capabilities.includes("durable-checkpoint"),
+		);
 		const installation = profileId
-			? installations.find(candidate => candidate.profile === profileId)
-			: installations.find(candidate =>
-					this.#profiles
-						.find(profile => profile.profile === candidate.profile)
-						?.capabilities.includes("durable-checkpoint"),
-				);
+			? checkpointInstallations.find(candidate => candidate.profile === profileId)
+			: checkpointInstallations.length === 1
+				? checkpointInstallations[0]
+				: undefined;
 		const profile = installation
 			? this.#profiles.find(candidate => candidate.profile === installation.profile)
 			: undefined;
-		if (!installation || !profile || !profile.capabilities.includes("durable-checkpoint")) {
+		if (!installation || !profile?.capabilities.includes("durable-checkpoint")) {
 			const receipt = this.#receipt("checkpoint", "blocked", {
 				operation,
 				sessionSha256,
 				profile: profileId,
-				blocker: "No configured appliance profile exposes durable checkpoints",
+				blocker:
+					!profileId && checkpointInstallations.length > 1
+						? "Multiple appliance profiles expose durable checkpoints; specify --profile"
+						: "No configured appliance profile exposes durable checkpoints",
 			});
 			await this.#store.writeReceipt(receipt);
 			return receipt;
@@ -612,6 +618,14 @@ export class ApplianceLifecycle {
 					candidateDiagnosticsRetained: true,
 				});
 				await this.#store.writeReceipt(receipt);
+				await this.#store.writeState(
+					{
+						...promoted,
+						revision: promoted.revision + 1,
+						lastRollbackReceiptId: receipt.receiptId,
+					},
+					promoted.revision,
+				);
 				return receipt;
 			} catch {
 				const receipt = this.#receipt("rollback", "failed", {

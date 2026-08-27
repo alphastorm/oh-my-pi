@@ -627,4 +627,39 @@ describe("NInfer durable checkpoint client", () => {
 		expect(error).toBeInstanceOf(NInferCheckpointError);
 		expect(error).toMatchObject({ kind: "unavailable", status: 409 });
 	});
+
+	it("cancels oversized checkpoint responses before buffering the full body", async () => {
+		const chunk = new Uint8Array(16 * 1024).fill(0x20);
+		let pulls = 0;
+		let cancelled = false;
+		const response = new Response(
+			new ReadableStream<Uint8Array>({
+				pull(controller) {
+					pulls += 1;
+					if (pulls > 32) {
+						controller.close();
+						return;
+					}
+					controller.enqueue(chunk);
+				},
+				cancel() {
+					cancelled = true;
+				},
+			}),
+			{ headers: { "content-type": "application/json" } },
+		);
+
+		const error = await requestNInferCheckpoint({
+			operation: "status",
+			sessionSha256: "c".repeat(64),
+			baseUrl: "http://127.0.0.1:18080/v1",
+			apiKey: "checkpoint-key",
+			fetch: vi.fn(async () => response) as FetchImpl,
+		}).catch(candidate => candidate);
+
+		expect(error).toBeInstanceOf(NInferCheckpointError);
+		expect(error).toMatchObject({ kind: "schema" });
+		expect(cancelled).toBe(true);
+		expect(pulls).toBeLessThan(32);
+	});
 });

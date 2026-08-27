@@ -82,7 +82,7 @@ An exact active installation registers the private `ninfer-appliance` provider a
 
 The fleet selector authenticates each compatible endpoint's status before use. A warm endpoint fingerprint wins. Fresh foreground work prefers RTX 5090; background work prefers RTX 4090, with RTX 5090 reservation enabled by default. Saturation, explicit profile alias, vision capability, and context capacity are evaluated before load selection.
 
-Corrupt, future-version, non-loopback, incomplete-release, or registry-drifted state is rejected before model selection. A warm-owner failure does not fall through to cloud. Optional cold-local fallback selects only a different healthy compatible local appliance and requires full replay.
+Corrupt, future-version, non-loopback, incomplete-release, or registry-drifted state fails closed for explicit local and endpoint-affined sessions. An unbound session already selecting a hosted model logs unavailable appliance state and continues on that selected provider. A warm-owner failure does not fall through to cloud. Optional cold-local fallback selects only a different healthy compatible local appliance and requires full replay.
 
 ## Status
 

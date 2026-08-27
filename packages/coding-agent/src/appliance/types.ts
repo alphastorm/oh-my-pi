@@ -183,6 +183,7 @@ export interface ApplianceStore {
 	readState(): Promise<ApplianceState>;
 	writeState(next: ApplianceState, expectedRevision: number): Promise<void>;
 	writeReceipt(receipt: ApplianceReceipt): Promise<string>;
+	hasSuccessfulRollbackReceipt(): Promise<boolean>;
 	createSecret(installationId: string): Promise<string>;
 	readSecret(secretRef: string): Promise<string>;
 	removeSecret(secretRef: string): Promise<void>;

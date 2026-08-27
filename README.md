@@ -28,7 +28,7 @@ OMP's local Qwen3.8 appliance is built around the outcome that matters: the auth
 
 - **Private by construction:** raw session IDs, prompts, outputs, secrets, URLs, and private host details stay out of ordinary receipts and affinity state.
 - **Deterministic recovery:** stale, absent, corrupt, incompatible, or endpoint-mismatched acceleration state produces one full transcript replay.
-- **No cloud escape hatch:** appliance failure never switches provider, model, or endpoint class. Optional cold fallback means another compatible authenticated **local** appliance only.
+- **No cloud escape hatch for local work:** explicit local and endpoint-affined sessions never switch provider, model, or endpoint class. An unbound session already selecting a hosted model may log unavailable appliance state and continue on that selected provider. Optional cold fallback means another compatible authenticated **local** appliance only.
 - **Transactional operations:** checksum-pinned install, isolated qualification, routed proof, and proven rollback leave the incumbent available until the replacement works.
 
 > [!IMPORTANT]

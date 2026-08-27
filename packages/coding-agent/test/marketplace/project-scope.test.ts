@@ -103,6 +103,24 @@ describe("resolveActiveProjectRegistryPath", () => {
 		expect(result).toBe(path.join(projectDir, ".omp", "plugins", "installed_plugins.json"));
 	});
 
+	it("stops at shared POSIX temporary roots independently of os.tmpdir()", async () => {
+		if (process.platform === "win32") return;
+		const sharedRoot = path.join(path.sep, "private", "tmp");
+		const cwd = path.join(sharedRoot, "project", "sub");
+		const sharedRegistry = path.join(sharedRoot, ".omp");
+		const stat = vi.spyOn(fs.promises, "stat").mockImplementation((async candidate => {
+			if (String(candidate) === sharedRegistry) {
+				return { isDirectory: () => true } as fs.Stats;
+			}
+			throw Object.assign(new Error("not found"), { code: "ENOENT" });
+		}) as typeof fs.promises.stat);
+
+		const result = await resolveActiveProjectRegistryPath(cwd);
+
+		expect(result).toBeNull();
+		expect(stat).not.toHaveBeenCalledWith(sharedRegistry);
+	});
+
 	it("returns null when neither .omp/ nor .git/ found anywhere in the tree", async () => {
 		// Start at the filesystem root — guaranteed to have no .omp/ or .git/ ancestors.
 		const result = await resolveActiveProjectRegistryPath(path.sep);

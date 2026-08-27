@@ -100,4 +100,37 @@ describe("issue #6114 fresh launch default role from discovery-only local provid
 			await session.dispose();
 		}
 	});
+
+	test("fails closed when a non-default role selects an unavailable appliance route", async () => {
+		const authStorage = await AuthStorage.create(path.join(tempDir, "role-auth.db"));
+		authStoragesToClose.push(authStorage);
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "openai/gpt-5-mini",
+				task: "ninfer-appliance/local-max",
+			},
+		});
+		const applianceDir = path.join(tempDir, "appliance");
+		fs.mkdirSync(applianceDir, { recursive: true });
+		fs.writeFileSync(path.join(applianceDir, "state.json"), `${JSON.stringify({ schemaVersion: 2, revision: 0 })}\n`);
+
+		await expect(
+			createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				settings,
+				sessionManager: SessionManager.inMemory(),
+				modelPattern: "@task",
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			}),
+		).rejects.toThrow("Unsupported appliance state schema");
+	});
 });

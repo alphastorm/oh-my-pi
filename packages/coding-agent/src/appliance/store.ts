@@ -4,10 +4,19 @@ import * as path from "node:path";
 import {
 	APPLIANCE_STATE_SCHEMA_VERSION,
 	type ApplianceInstallation,
+	type ApplianceProfileId,
 	type ApplianceReceipt,
 	type ApplianceState,
 	type ApplianceStore,
 } from "./types";
+
+const PROFILE_IDS = new Set<ApplianceProfileId>([
+	"rtx5090-linux",
+	"rtx4090-windows",
+	"darwin-remote-ssh",
+	"windows-docker-local",
+	"linux-docker-local",
+]);
 
 const STATE_FILE = "state.json";
 const LOCK_FILE = "install.lock";
@@ -34,7 +43,7 @@ function parseInstallation(value: unknown): ApplianceInstallation {
 	const profile = value.profile;
 	const routeProfile = route.profile;
 	if (
-		(profile !== "rtx5090-linux" && profile !== "rtx4090-windows") ||
+		!PROFILE_IDS.has(profile as ApplianceProfileId) ||
 		routeProfile !== profile ||
 		route.provider !== "ninfer-appliance" ||
 		route.servedModel !== "q38-ninfer" ||
@@ -59,7 +68,7 @@ function parseInstallation(value: unknown): ApplianceInstallation {
 	}
 	return {
 		installationId: value.installationId,
-		profile,
+		profile: profile as ApplianceProfileId,
 		release: optionalString(value.release),
 		artifactSha256: value.artifactSha256,
 		runtimeSha256: value.runtimeSha256,
@@ -71,7 +80,7 @@ function parseInstallation(value: unknown): ApplianceInstallation {
 			baseUrl: route.baseUrl,
 			port: route.port,
 			servedModel: "q38-ninfer",
-			profile,
+			profile: profile as ApplianceProfileId,
 			release: optionalString(route.release),
 			aliases: [...route.aliases],
 			secretRef: route.secretRef,
@@ -100,12 +109,36 @@ function parseState(raw: string): ApplianceState {
 		}
 		installationIds.add(installation.installationId);
 	}
+	let pending: ApplianceState["pending"];
+	if (parsed.pending !== undefined) {
+		if (!isRecord(parsed.pending)) throw new Error("Invalid pending appliance transaction");
+		const action = parsed.pending.action;
+		const stage = parsed.pending.stage;
+		const profile = parsed.pending.profile;
+		if (
+			(action !== "install" && action !== "rollback") ||
+			(stage !== "before-predecessor-stop" && stage !== "after-predecessor-stop") ||
+			!PROFILE_IDS.has(profile as ApplianceProfileId) ||
+			typeof parsed.pending.installationId !== "string"
+		) {
+			throw new Error("Invalid pending appliance transaction");
+		}
+		pending = {
+			action,
+			stage,
+			profile: profile as ApplianceProfileId,
+			installationId: parsed.pending.installationId,
+			predecessor: parsed.pending.predecessor === undefined ? undefined : parseInstallation(parsed.pending.predecessor),
+			failureReceiptId: optionalString(parsed.pending.failureReceiptId),
+		};
+	}
 	return {
 		schemaVersion: APPLIANCE_STATE_SCHEMA_VERSION,
 		revision: parsed.revision,
 		active,
 		fleet,
 		rollbackTarget: parsed.rollbackTarget === undefined ? undefined : parseInstallation(parsed.rollbackTarget),
+		pending,
 		lastInstallReceiptId: optionalString(parsed.lastInstallReceiptId),
 		lastRollbackReceiptId: optionalString(parsed.lastRollbackReceiptId),
 	};
@@ -116,6 +149,11 @@ function assertSafeIdentifier(value: string, name: string): void {
 }
 
 async function syncDirectory(directory: string): Promise<void> {
+	// Node/Win32 does not expose a supported directory durability flush. NTFS
+	// journals rename metadata, but does not promise that an acknowledged rename
+	// survives power loss. Keep the flushed-file + atomic-rename boundary; the
+	// lifecycle reconciles a potentially stopped active route before a clean install.
+	if (process.platform === "win32") return;
 	const handle = await fs.open(directory, "r");
 	try {
 		await handle.sync();
@@ -161,9 +199,19 @@ function isProcessAlive(pid: number): boolean {
 
 export class FileApplianceStore implements ApplianceStore {
 	readonly root: string;
+	readonly #beforeWrite?: (root: string) => Promise<void>;
+	#writeReady = false;
 
-	constructor(agentDir: string) {
-		this.root = path.join(agentDir, "appliance");
+	constructor(agentDir: string, options: { root?: string; beforeWrite?: (root: string) => Promise<void> } = {}) {
+		this.root = options.root ?? path.join(agentDir, "appliance");
+		this.#beforeWrite = options.beforeWrite;
+	}
+
+	async #ensureWriteReady(): Promise<void> {
+		if (this.#writeReady) return;
+		await fs.mkdir(this.root, { recursive: true, mode: 0o700 });
+		await this.#beforeWrite?.(this.root);
+		this.#writeReady = true;
 	}
 
 	async readState(): Promise<ApplianceState> {
@@ -176,6 +224,7 @@ export class FileApplianceStore implements ApplianceStore {
 	}
 
 	async writeState(next: ApplianceState, expectedRevision: number): Promise<void> {
+		await this.#ensureWriteReady();
 		const current = await this.readState();
 		if (current.revision !== expectedRevision) {
 			throw new Error(
@@ -189,6 +238,7 @@ export class FileApplianceStore implements ApplianceStore {
 	}
 
 	async writeReceipt(receipt: ApplianceReceipt): Promise<string> {
+		await this.#ensureWriteReady();
 		assertSafeIdentifier(receipt.receiptId, "receipt identifier");
 		const file = path.join(this.root, "receipts", `${receipt.action}-${receipt.receiptId}.json`);
 		await atomicWriteJson(file, receipt);
@@ -226,6 +276,7 @@ export class FileApplianceStore implements ApplianceStore {
 	}
 
 	async createSecret(installationId: string): Promise<string> {
+		await this.#ensureWriteReady();
 		assertSafeIdentifier(installationId, "installation identifier");
 		const relative = path.join("secrets", `${installationId}.key`);
 		const file = path.join(this.root, relative);
@@ -251,7 +302,7 @@ export class FileApplianceStore implements ApplianceStore {
 	}
 
 	async withInstallLock<T>(run: () => Promise<T>): Promise<T> {
-		await fs.mkdir(this.root, { recursive: true, mode: 0o700 });
+		await this.#ensureWriteReady();
 		const lockPath = path.join(this.root, LOCK_FILE);
 		let handle: fs.FileHandle | undefined;
 		for (let attempt = 0; attempt < 2; attempt += 1) {

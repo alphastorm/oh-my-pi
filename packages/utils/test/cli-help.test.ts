@@ -5,6 +5,7 @@ class GoodCommand extends Command {
 	static description = "prints good things";
 	static flags = {
 		verbose: Flags.boolean({ description: "be loud" }),
+		internal: Flags.string({ description: "bootstrap contract", hidden: true }),
 	};
 	async run(): Promise<void> {}
 }
@@ -51,6 +52,7 @@ describe("run() per-command help", () => {
 		expect(brokenLoads).toBe(0);
 		expect(writes.join("")).toContain("prints good things");
 		expect(writes.join("")).toContain("--verbose");
+		expect(writes.join("")).not.toContain("--internal");
 	});
 });
 

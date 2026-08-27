@@ -1,9 +1,20 @@
 import { describe, expect, it } from "bun:test";
 import type { NInferCheckpointOperation, NInferCheckpointStatus } from "@oh-my-pi/pi-ai/providers/ninfer";
+import { createHash } from "node:crypto";
+import { rm } from "node:fs/promises";
 import { ApplianceLifecycle } from "@oh-my-pi/pi-coding-agent/appliance/lifecycle";
+import {
+	decodeRemoteApplianceRequest,
+	encodeRemoteApplianceRequest,
+	runRemoteApplianceDelegation,
+	type DecodedRemoteApplianceRequest,
+	type RemoteApplianceCompatibility,
+	type RemoteApplianceInvocation,
+} from "@oh-my-pi/pi-coding-agent/appliance/remote-protocol";
 import { APPLIANCE_PROFILES } from "@oh-my-pi/pi-coding-agent/appliance/registry";
 import {
 	APPLIANCE_STATE_SCHEMA_VERSION,
+	type ApplianceAction,
 	type ApplianceAsset,
 	type ApplianceCandidate,
 	type ApplianceEndpointStatus,
@@ -65,6 +76,9 @@ function healthyHost(): ApplianceHostFacts {
 function emptyState(): ApplianceState {
 	return { schemaVersion: APPLIANCE_STATE_SCHEMA_VERSION, revision: 0 };
 }
+function cloneState(state: ApplianceState): ApplianceState {
+	return JSON.parse(JSON.stringify(state)) as ApplianceState;
+}
 
 class MemoryStore implements ApplianceStore {
 	state = emptyState();
@@ -78,7 +92,7 @@ class MemoryStore implements ApplianceStore {
 	events: string[] = [];
 
 	async readState(): Promise<ApplianceState> {
-		return structuredClone(this.state);
+		return cloneState(this.state);
 	}
 
 	async writeState(next: ApplianceState, expectedRevision: number): Promise<void> {
@@ -89,7 +103,7 @@ class MemoryStore implements ApplianceStore {
 		if (this.state.revision !== expectedRevision) throw new Error("unexpected-state-revision");
 		if (next.revision !== expectedRevision + 1) throw new Error("state-revision-not-advanced");
 		this.stateWrites += 1;
-		this.state = structuredClone(next);
+		this.state = cloneState(next);
 		this.events.push(`state:${next.active?.installationId ?? "none"}`);
 	}
 
@@ -133,7 +147,9 @@ class FakePlatform implements AppliancePlatform {
 	failAcquireKind?: ApplianceAsset["kind"];
 	failAcquireMode: "interrupted" | "checksum" = "interrupted";
 	failCandidateHealth = false;
+	failStartCandidate = false;
 	failHealthInstallations = new Set<string>();
+	recoverHealthOnStart = false;
 	failProtocol = false;
 	qualificationOk = true;
 	failNextRoutedRequest = false;
@@ -190,15 +206,20 @@ class FakePlatform implements AppliancePlatform {
 
 	async startCandidate(): Promise<void> {
 		this.events.push("candidate:start");
+		if (this.failStartCandidate) throw new Error("candidate-start-interrupted");
 	}
 
 	async stopCandidate(candidateHandle: string): Promise<void> {
 		this.events.push("candidate:stop");
 		this.stopped.push(candidateHandle);
 	}
+	async stopInstallation(installation: ApplianceInstallation): Promise<void> {
+		this.events.push(`incumbent:stop:${installation.installationId}`);
+	}
 
 	async startInstallation(installation: ApplianceInstallation): Promise<void> {
 		this.events.push(`incumbent:start:${installation.installationId}`);
+		if (this.recoverHealthOnStart) this.failHealthInstallations.delete(installation.installationId);
 	}
 
 	async probeHealth(target: ApplianceCandidate | ApplianceInstallation): Promise<void> {
@@ -505,15 +526,31 @@ describe("appliance lifecycle", () => {
 		const first = await lifecycle.install("qwen3.8", "auto");
 		expect(first.status).toBe("ok");
 		expect(first.details.routeChanged).toBe(true);
-		expect(store.state.revision).toBe(1);
+		expect(store.state.revision).toBe(2);
 		expect(store.state.active?.route.aliases).toContain("local-max");
 		expect(platform.candidateCount).toBe(1);
 
 		const second = await lifecycle.install("qwen3.8", "auto");
 		expect(second.status).toBe("ok");
 		expect(second.details).toMatchObject({ idempotent: true, routeChanged: false });
-		expect(store.state.revision).toBe(1);
+		expect(store.state.revision).toBe(2);
 		expect(platform.candidateCount).toBe(1);
+	});
+
+	it("restarts a potentially clean active route before treating a missing pending marker as clean", async () => {
+		const { lifecycle, store, platform, profile } = harness();
+		const active = installation("active", profile, "secrets/active.key", profile.defaultPort);
+		store.state = { ...emptyState(), revision: 4, active };
+		store.secrets.set(active.route.secretRef, "active-secret");
+		platform.failHealthInstallations.add(active.installationId);
+		platform.recoverHealthOnStart = true;
+
+		const receipt = await lifecycle.install("qwen3.8", "auto");
+
+		expect(receipt).toMatchObject({ status: "ok", details: { idempotent: true, routeChanged: false } });
+		expect(platform.events).toContain("incumbent:start:active");
+		expect(platform.candidateCount).toBe(0);
+		expect(store.state).toEqual({ ...emptyState(), revision: 4, active });
 	});
 
 	it("retains an upgraded incumbent as a routable fleet member", async () => {
@@ -546,7 +583,12 @@ describe("appliance lifecycle", () => {
 			const receipt = await lifecycle.install("qwen3.8", "auto");
 			expect(receipt.status).toBe("failed");
 			expect(receipt.details.failureStage).toBe(`${kind}-download`);
-			expect(store.state).toEqual(emptyState());
+			expect(store.state.active).toBeUndefined();
+			expect(store.state.pending).toMatchObject({
+				action: "install",
+				stage: "before-predecessor-stop",
+				failureReceiptId: expect.any(String),
+			});
 			expect(platform.candidateCount).toBe(0);
 			expect(store.secrets.size).toBe(0);
 			expect(JSON.stringify(receipt)).not.toContain("sensitive-path");
@@ -562,7 +604,12 @@ describe("appliance lifecycle", () => {
 
 		expect(receipt.status).toBe("failed");
 		expect(receipt.details.failureStage).toBe("model-download");
-		expect(store.state).toEqual(emptyState());
+		expect(store.state.active).toBeUndefined();
+			expect(store.state.pending).toMatchObject({
+				action: "install",
+				stage: "before-predecessor-stop",
+				failureReceiptId: expect.any(String),
+			});
 		expect(platform.candidateCount).toBe(0);
 		expect(store.secrets.size).toBe(0);
 		expect(JSON.stringify(receipt)).not.toContain("sensitive-path");
@@ -600,7 +647,12 @@ describe("appliance lifecycle", () => {
 			incumbentPreserved: true,
 			routeChanged: false,
 		});
-		expect(store.state).toEqual(emptyState());
+		expect(store.state.active).toBeUndefined();
+			expect(store.state.pending).toMatchObject({
+				action: "install",
+				stage: "before-predecessor-stop",
+				failureReceiptId: expect.any(String),
+			});
 		expect(platform.stopped).toHaveLength(1);
 		expect(store.secrets.size).toBe(0);
 	});
@@ -621,7 +673,7 @@ describe("appliance lifecycle", () => {
 			candidateStopped: true,
 		});
 		expect(store.state.active?.installationId).toBe("incumbent");
-		expect(store.state.revision).toBe(6);
+		expect(store.state.revision).toBe(8);
 		expect(platform.stopped).toEqual(["candidates/candidate-id-2"]);
 	});
 
@@ -645,7 +697,7 @@ describe("appliance lifecycle", () => {
 			candidatePreserved: true,
 		});
 		expect(store.state.active?.installationId).toBe("id-2");
-		expect(store.state.revision).toBe(5);
+		expect(store.state.revision).toBe(7);
 		expect(platform.stopped).toEqual([]);
 		expect(store.secrets.size).toBe(2);
 	});
@@ -670,7 +722,7 @@ describe("appliance lifecycle", () => {
 			candidatePreserved: true,
 		});
 		expect(store.state.active?.installationId).toBe("incumbent");
-		expect(store.state.revision).toBe(6);
+		expect(store.state.revision).toBe(8);
 		expect(platform.stopped).toEqual([]);
 		expect(store.secrets.size).toBe(2);
 	});
@@ -690,8 +742,9 @@ describe("appliance lifecycle", () => {
 		expect(store.state.active?.installationId).toBe("incumbent");
 		expect(store.state.rollbackTarget?.installationId).toBe("candidate");
 		expect(store.state.lastRollbackReceiptId).toBe(receipt.receiptId);
-		expect(store.state.revision).toBe(9);
+		expect(store.state.revision).toBe(11);
 		expect(platform.events).toEqual([
+			"incumbent:stop:candidate",
 			"incumbent:start:incumbent",
 			"health:incumbent",
 			"routed:incumbent",
@@ -750,9 +803,10 @@ describe("appliance lifecycle", () => {
 		});
 		expect(store.state.active?.installationId).toBe("candidate");
 		expect(store.state.rollbackTarget?.installationId).toBe("incumbent");
-		expect(store.state.revision).toBe(9);
+		expect(store.state.revision).toBe(11);
 		expect(platform.stopped).toEqual([]);
 		expect(platform.events).toEqual([
+			"incumbent:stop:candidate",
 			"incumbent:start:incumbent",
 			"health:incumbent",
 			"routed:incumbent",
@@ -851,5 +905,409 @@ describe("appliance lifecycle", () => {
 		expect(store.stateWrites).toBe(0);
 		expect(store.receiptWrites).toBe(1);
 		expect(store.secretWrites).toBe(0);
+	});
+
+	it("resumes the same durable transaction after an interrupted download", async () => {
+		const { lifecycle, store, platform } = harness();
+		platform.failAcquireKind = "runtime";
+		const failed = await lifecycle.install("qwen3.8", "auto");
+		const installationId = store.state.pending?.installationId;
+		expect(failed.status).toBe("failed");
+		expect(store.state.pending).toMatchObject({ stage: "before-predecessor-stop", failureReceiptId: expect.any(String) });
+		platform.failAcquireKind = undefined;
+
+		const resumed = await lifecycle.install("qwen3.8", "auto");
+
+		expect(resumed.status).toBe("ok");
+		expect(store.state.active?.installationId).toBe(installationId);
+		expect(store.state.pending).toBeUndefined();
+	});
+
+	it("restores the predecessor before retrying a post-stop interruption", async () => {
+		const { lifecycle, store, platform, profile } = harness();
+		const predecessorProfile = { ...profile, profile: "rtx4090-windows" as const, release: undefined };
+		const predecessor = installation("predecessor", predecessorProfile, "secrets/predecessor.key", 8000);
+		store.secrets.set(predecessor.route.secretRef, "predecessor-secret");
+		store.state = { schemaVersion: 1, revision: 3, active: predecessor };
+		platform.failStartCandidate = true;
+
+		const failed = await lifecycle.install("qwen3.8", "auto");
+
+		expect(failed).toMatchObject({ status: "failed", details: { incumbentPreserved: true, restorationFailed: false } });
+		expect(store.state.pending?.stage).toBe("before-predecessor-stop");
+		expect(platform.events).toContain("incumbent:start:predecessor");
+		platform.failStartCandidate = false;
+
+		const resumed = await lifecycle.install("qwen3.8", "auto");
+
+		expect(resumed.status).toBe("ok");
+		expect(store.state.active?.profile).toBe("rtx5090-linux");
+		expect(store.state.rollbackTarget?.installationId).toBe("predecessor");
+		expect(store.state.pending).toBeUndefined();
+	});
+});
+
+const MANAGED_COMMANDS: ApplianceAction[] = [
+	"doctor", "plan", "install", "status", "benchmark", "checkpoint", "rollback", "support-bundle",
+];
+
+function managedAuthorityProfile(id: "darwin-remote-ssh" | "linux-docker-local") {
+	const publicReceipt = (digit: string) => ({
+		url: "https://releases.example.test/" + digit + ".json",
+		sha256: digit.repeat(64),
+	});
+	return {
+		id,
+		adapter: id,
+		status: "preview",
+		transport: id === "darwin-remote-ssh" ? "ssh-loopback" : "local-loopback",
+		commands: MANAGED_COMMANDS,
+		silent_cloud_fallback: false,
+		installable: true,
+		support_owner: "omp-ninfer",
+		product_release: "v0.2.0",
+		aliases: ["local-max", "local-fast", "local-batch"],
+		local_port: 8000,
+		container_port: 8080,
+		limitations: [],
+		blockers: [],
+		acceptance_receipt: publicReceipt("a"),
+		gpu_qualification: { profile: "qwen38-5090-v0.2.0", status: "qualified", receipt: publicReceipt("b") },
+		runtime: {
+			image_reference: "ghcr.io/alphastorm/ninfer@sha256:" + RUNTIME_SHA,
+			image_digest: "sha256:" + RUNTIME_SHA,
+			model_url: "https://releases.example.test/qwen.ninfer",
+			model_bytes: 300,
+			model_sha256: MODEL_SHA,
+			configuration_sha256: "d".repeat(64),
+			server_binary_sha256: "c".repeat(64),
+			minimum_vram_gib: 32,
+			minimum_disk_gib: 64,
+			cuda_architecture: "sm_120a",
+			maximum_context_tokens: 131072,
+			maximum_output_tokens: 32768,
+			maximum_concurrency: 1,
+			kv_dtype: "bf16",
+			speculative_backend: "mtp",
+			draft_tokens: 3,
+			vision: true,
+			preserve_thinking: true,
+			capabilities: ["tools", "reasoning", "thinking-history", "stateful-responses", "vision", "durable-checkpoint"],
+		},
+		lifecycle: {
+			script_url: "https://releases.example.test/lifecycle.sh",
+			script_sha256: "f".repeat(64),
+			arguments: [],
+		},
+	};
+}
+
+function managedCompatibility(): RemoteApplianceCompatibility {
+	const bytes = Buffer.from(JSON.stringify({
+		schema_version: 1,
+		authority_id: "omp-ninfer-v0.2",
+		profiles: [managedAuthorityProfile("darwin-remote-ssh"), managedAuthorityProfile("linux-docker-local")],
+	}), "utf8");
+	return {
+		bytes,
+		sha256: createHash("sha256").update(bytes).digest("hex"),
+		transportProfile: "darwin-remote-ssh",
+	};
+}
+
+class RemoteLifecycleHarness {
+	readonly store = new MemoryStore();
+	readonly platform = new FakePlatform();
+	readonly compatibility = managedCompatibility();
+	profile?: ApplianceProfile;
+	delegatedWslDistribution?: string;
+	invocations = 0;
+	#id = 0;
+
+	async execute(
+		invocation: RemoteApplianceInvocation,
+		overrides: {
+			writeCompatibility?: (path: string, bytes: Uint8Array) => Promise<void>;
+			removeOperationRoot?: (path: string) => Promise<void>;
+			environment?: Record<string, string | undefined>;
+		} = {},
+	): Promise<ApplianceReceipt> {
+		const payload = encodeRemoteApplianceRequest(invocation, this.compatibility);
+		return this.executeDecoded(
+			decodeRemoteApplianceRequest(payload, invocation.action, this.compatibility.bytes),
+			overrides,
+		);
+	}
+
+	async executeDecoded(
+		request: DecodedRemoteApplianceRequest,
+		overrides: {
+			writeCompatibility?: (path: string, bytes: Uint8Array) => Promise<void>;
+			removeOperationRoot?: (path: string) => Promise<void>;
+			environment?: Record<string, string | undefined>;
+		} = {},
+	): Promise<ApplianceReceipt> {
+		return runRemoteApplianceDelegation(request, {
+			platform: "linux",
+			...overrides,
+			invoke: async delegated => {
+				this.invocations += 1;
+				this.profile = delegated.selectedProfile;
+				this.delegatedWslDistribution = delegated.delegatedWslDistribution;
+				const lifecycle = new ApplianceLifecycle({
+					store: this.store,
+					platform: this.platform,
+					profiles: delegated.authority?.profiles,
+					selectedProfileId: delegated.selectedProfile?.profile,
+					now: () => new Date("2026-08-28T12:00:00.000Z"),
+					newId: () => `remote-id-${++this.#id}`,
+					probeAttempts: 1,
+					sleep: async () => {},
+				});
+				switch (delegated.action) {
+					case "doctor":
+						return lifecycle.doctor(delegated.port ?? delegated.selectedProfile?.defaultPort);
+					case "plan":
+						return (await lifecycle.plan(delegated.model!, delegated.gpu ?? "auto", delegated.port)).receipt;
+					case "install":
+						return lifecycle.install(delegated.model!, delegated.gpu ?? "auto", delegated.port);
+					case "status":
+						return lifecycle.status();
+					case "benchmark":
+						return lifecycle.benchmark(delegated.quick === true);
+					case "checkpoint":
+						return lifecycle.checkpoint(
+							delegated.checkpointOperation!,
+							delegated.sessionSha256!,
+							delegated.selectedProfile?.profile,
+						);
+					case "rollback":
+						return lifecycle.rollback();
+					case "support-bundle":
+						return lifecycle.supportBundle();
+				}
+			},
+		});
+	}
+}
+
+describe("remote appliance lifecycle delegation", () => {
+	it("runs a managed action in the exact caller-selected WSL distribution while retaining remote state ownership", async () => {
+		const remote = new RemoteLifecycleHarness();
+		const payload = encodeRemoteApplianceRequest(
+			{ action: "install", model: "qwen3.8", gpu: "auto" },
+			remote.compatibility,
+			"Ubuntu-24.04",
+		);
+		const request = decodeRemoteApplianceRequest(payload, "install", remote.compatibility.bytes);
+
+		const installed = await remote.executeDecoded(request, {
+			environment: { WSL_INTEROP: "/run/WSL/1_interop", WSL_DISTRO_NAME: "Ubuntu-24.04" },
+		});
+
+		expect(installed).toMatchObject({
+			status: "ok",
+			details: { remoteDelegation: { transportProfile: "darwin-remote-ssh", localProfile: "linux-docker-local" } },
+		});
+		expect(remote.delegatedWslDistribution).toBe("Ubuntu-24.04");
+		expect(remote.store.state.active?.profile).toBe("linux-docker-local");
+		expect(remote.store.stateWrites).toBeGreaterThan(0);
+
+		const mismatched = await remote.executeDecoded(request, {
+			environment: { WSL_INTEROP: "/run/WSL/1_interop", WSL_DISTRO_NAME: "Debian" },
+		});
+		expect(mismatched).toMatchObject({
+			status: "failed",
+			details: { remoteDelegation: { failureCode: "REMOTE_WSL_CONTEXT_MISMATCH", effect: "none", localProfile: null } },
+		});
+	});
+
+	it("classifies benchmark, checkpoint status, and support bundles as effectful before a missing receipt", async () => {
+		const remote = new RemoteLifecycleHarness();
+		for (const invocation of [
+			{ action: "benchmark", quick: true },
+			{ action: "checkpoint", checkpointOperation: "status", sessionSha256: "8".repeat(64) },
+			{ action: "support-bundle" },
+		] as const) {
+			const payload = encodeRemoteApplianceRequest(invocation, remote.compatibility);
+			const request = decodeRemoteApplianceRequest(payload, invocation.action, remote.compatibility.bytes);
+			const failure = await runRemoteApplianceDelegation(request, {
+				platform: "linux",
+				invoke: async () => { throw new Error("transport ended without a receipt"); },
+			});
+			expect(failure.details.remoteDelegation).toMatchObject({ effect: "uncertain" });
+		}
+
+		const planPayload = encodeRemoteApplianceRequest(
+			{ action: "plan", model: "qwen3.8", gpu: "auto" },
+			remote.compatibility,
+		);
+		const planRequest = decodeRemoteApplianceRequest(planPayload, "plan", remote.compatibility.bytes);
+		const planFailure = await runRemoteApplianceDelegation(planRequest, {
+			platform: "linux",
+			invoke: async () => { throw new Error("transport ended without a receipt"); },
+		});
+		expect(planFailure.details.remoteDelegation).toMatchObject({ effect: "none" });
+	});
+
+	it("owns clean install, already-installed, benchmark, and checkpoint state only on the remote loopback lifecycle", async () => {
+		const remote = new RemoteLifecycleHarness();
+		const callerStore = new MemoryStore();
+		const callerBefore = cloneState(callerStore.state);
+
+		const plan = await remote.execute({ action: "plan", model: "qwen3.8", gpu: "auto" });
+		expect(plan).toMatchObject({ status: "ok", details: { installable: true, profile: { profile: "linux-docker-local" } } });
+		expect(remote.store.stateWrites).toBe(0);
+
+		const installed = await remote.execute({ action: "install", model: "qwen3.8", gpu: "auto" });
+		expect(installed).toMatchObject({ status: "ok", details: { routeChanged: true } });
+		expect(remote.store.state.active?.profile).toBe("linux-docker-local");
+		expect(remote.platform.candidateCount).toBe(1);
+		const stateRevision = remote.store.state.revision;
+
+		const repeated = await remote.execute({ action: "install", model: "qwen3.8", gpu: "auto" });
+		expect(repeated).toMatchObject({ status: "ok", details: { idempotent: true, routeChanged: false } });
+		expect(remote.platform.candidateCount).toBe(1);
+		expect(remote.store.state.revision).toBe(stateRevision);
+
+		const benchmark = await remote.execute({ action: "benchmark", quick: true });
+		expect(benchmark).toMatchObject({ status: "ok", details: { quick: true } });
+		const checkpoint = await remote.execute({
+			action: "checkpoint",
+			checkpointOperation: "save",
+			sessionSha256: "8".repeat(64),
+		});
+		expect(checkpoint).toMatchObject({ status: "ok", details: { operation: "save", state: "available" } });
+		expect(remote.platform.checkpointCalls).toHaveLength(1);
+		expect(callerStore.state).toEqual(callerBefore);
+		expect(callerStore.stateWrites).toBe(0);
+		expect(JSON.stringify([installed, checkpoint])).not.toContain("super-secret");
+		expect(JSON.stringify(installed)).not.toContain("secretRef");
+	});
+
+	it("preserves an upgrade predecessor, rolls it back exactly, and emits only a sanitized support receipt", async () => {
+		const remote = new RemoteLifecycleHarness();
+		await remote.execute({ action: "plan", model: "qwen3.8", gpu: "auto" });
+		const target = remote.profile!;
+		const predecessor = installation("predecessor", target, "secrets/predecessor.key", 9000);
+		predecessor.release = "v0.1.0";
+		predecessor.route.release = "v0.1.0";
+		remote.store.state = { ...emptyState(), revision: 3, active: predecessor };
+		remote.store.secrets.set(predecessor.route.secretRef, "remote-predecessor-secret");
+
+		const upgrade = await remote.execute({ action: "install", model: "qwen3.8", gpu: "auto" });
+		expect(upgrade.status).toBe("ok");
+		expect(remote.store.state.active?.release).toBe(target.release);
+		expect(remote.store.state.rollbackTarget?.installationId).toBe("predecessor");
+		expect(remote.store.state.fleet?.map(value => value.installationId)).toEqual(["predecessor"]);
+
+		const rollback = await remote.execute({ action: "rollback" });
+		expect(rollback.status).toBe("rolled-back");
+		expect(remote.store.state.active?.installationId).toBe("predecessor");
+		expect(remote.store.state.fleet).toEqual([]);
+
+		const support = await remote.execute({ action: "support-bundle" });
+		expect(support.status).toBe("ok");
+		expect(support.details).toMatchObject({
+			profile: "linux-docker-local",
+			verdicts: { rollback: "passed" },
+			remoteDelegation: { cleanup: "ok", effect: "confirmed" },
+		});
+		const serialized = JSON.stringify(support);
+		for (const forbidden of ["remote-predecessor-secret", "secretRef", "privatePath", "rawLog", "prompt", "modelOutput"]) {
+			expect(serialized).not.toContain(forbidden);
+		}
+	});
+
+	it("resumes the same pre-stop transaction and restores before retrying a post-stop interruption", async () => {
+		const preStop = new RemoteLifecycleHarness();
+		preStop.platform.failAcquireKind = "runtime";
+		const failedDownload = await preStop.execute({ action: "install", model: "qwen3.8", gpu: "auto" });
+		const installationId = preStop.store.state.pending?.installationId;
+		expect(failedDownload).toMatchObject({ status: "failed", details: { failureStage: "runtime-download" } });
+		expect(preStop.store.state.pending?.stage).toBe("before-predecessor-stop");
+		preStop.platform.failAcquireKind = undefined;
+		const resumedDownload = await preStop.execute({ action: "install", model: "qwen3.8", gpu: "auto" });
+		expect(resumedDownload.status).toBe("ok");
+		expect(preStop.store.state.active?.installationId).toBe(installationId);
+		expect(preStop.store.state.pending).toBeUndefined();
+
+		const postStop = new RemoteLifecycleHarness();
+		await postStop.execute({ action: "plan", model: "qwen3.8", gpu: "auto" });
+		const predecessor = installation("predecessor", postStop.profile!, "secrets/predecessor.key", 8000);
+		predecessor.release = "v0.1.0";
+		predecessor.route.release = "v0.1.0";
+		postStop.store.secrets.set(predecessor.route.secretRef, "predecessor-secret");
+		postStop.store.state = { ...emptyState(), revision: 3, active: predecessor };
+		postStop.platform.failStartCandidate = true;
+		const failedStart = await postStop.execute({ action: "install", model: "qwen3.8", gpu: "auto" });
+		expect(failedStart).toMatchObject({ status: "failed", details: { incumbentPreserved: true, restorationFailed: false } });
+		expect(postStop.store.state.pending?.stage).toBe("before-predecessor-stop");
+		expect(postStop.platform.events).toContain("incumbent:start:predecessor");
+		postStop.platform.failStartCandidate = false;
+		const resumedStart = await postStop.execute({ action: "install", model: "qwen3.8", gpu: "auto" });
+		expect(resumedStart.status).toBe("ok");
+		expect(postStop.store.state.rollbackTarget?.installationId).toBe("predecessor");
+		expect(postStop.store.state.pending).toBeUndefined();
+	});
+
+	it("fails closed on authority hash drift and reports cleanup failure after a confirmed effect", async () => {
+		const mismatch = new RemoteLifecycleHarness();
+		const payload = encodeRemoteApplianceRequest(
+			{ action: "install", model: "qwen3.8", gpu: "auto" },
+			mismatch.compatibility,
+		);
+		const request = decodeRemoteApplianceRequest(payload, "install", mismatch.compatibility.bytes);
+		request.compatibility!.sha256 = "0".repeat(64);
+		const rejected = await mismatch.executeDecoded(request);
+		expect(rejected).toMatchObject({
+			status: "failed",
+			details: { remoteDelegation: { failureCode: "REMOTE_COMPATIBILITY_HASH_MISMATCH", effect: "none" } },
+		});
+		expect(mismatch.invocations).toBe(0);
+		expect(mismatch.store.stateWrites).toBe(0);
+
+		const cleanup = new RemoteLifecycleHarness();
+		const cleanupFailure = await cleanup.execute(
+			{ action: "install", model: "qwen3.8", gpu: "auto" },
+			{ removeOperationRoot: async path => { await rm(path, { recursive: true }); throw new Error("cleanup denied /private/path"); } },
+		);
+		expect(cleanupFailure).toMatchObject({
+			status: "failed",
+			details: {
+				routeChanged: true,
+				remoteDelegation: {
+					failureCode: "REMOTE_BOOTSTRAP_CLEANUP_FAILED",
+					cleanup: "failed",
+					effect: "confirmed",
+				},
+			},
+		});
+		expect(cleanup.store.state.active?.profile).toBe("linux-docker-local");
+		expect(JSON.stringify(cleanupFailure)).not.toContain("/private/path");
+	});
+
+	it("preserves a delegated action failure when bootstrap cleanup also fails", async () => {
+		const remote = new RemoteLifecycleHarness();
+		const payload = encodeRemoteApplianceRequest(
+			{ action: "install", model: "qwen3.8", gpu: "auto" },
+			remote.compatibility,
+		);
+		const request = decodeRemoteApplianceRequest(payload, "install", remote.compatibility.bytes);
+		const failure = await runRemoteApplianceDelegation(request, {
+			platform: "linux",
+			invoke: async () => { throw new Error("delegated install failed"); },
+			removeOperationRoot: async path => { await rm(path, { recursive: true }); throw new Error("cleanup also failed"); },
+		});
+		expect(failure).toMatchObject({
+			status: "failed",
+			details: {
+				remoteDelegation: {
+					failureCode: "REMOTE_DELEGATED_ACTION_FAILED",
+					cleanup: "failed",
+					effect: "uncertain",
+				},
+			},
+		});
 	});
 });

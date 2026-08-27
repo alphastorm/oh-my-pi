@@ -7,7 +7,14 @@ import type {
 export const APPLIANCE_STATE_SCHEMA_VERSION = 1 as const;
 export const APPLIANCE_RECEIPT_SCHEMA_VERSION = 1 as const;
 
-export type ApplianceProfileId = "rtx5090-linux" | "rtx4090-windows";
+export type ApplianceProfileId =
+	| "rtx5090-linux"
+	| "rtx4090-windows"
+	| "darwin-remote-ssh"
+	| "windows-docker-local"
+	| "linux-docker-local";
+export type ApplianceAdapterId = "darwin-remote-ssh" | "windows-docker-local" | "linux-docker-local";
+export type ApplianceSupportStatus = "qualified" | "preview" | "blocked" | "unsupported";
 export type ApplianceGpuSelector = "auto" | "rtx5090" | "rtx4090";
 export type ApplianceAction =
 	| "doctor"
@@ -40,6 +47,21 @@ export interface ApplianceLaunchDescriptor {
 	secretEnvironmentVariable: string;
 }
 
+export interface ApplianceContainerDescriptor {
+	imageReference: string;
+	imageDigest: string;
+	containerPort: number;
+	serverBinarySha256: string;
+	configurationSha256: string;
+	restartPolicy: "no";
+}
+
+export interface ApplianceLifecycleDescriptor {
+	scriptUrl: string;
+	scriptSha256: string;
+	arguments: string[];
+}
+
 export interface ApplianceAvailability {
 	installable: boolean;
 	channel: "released" | "beta";
@@ -53,21 +75,32 @@ export interface ApplianceProfile {
 	runtime: "ninfer" | "ninfer-4090";
 	architecture: "sm_120a" | "sm_89";
 	minVramGiB: number;
+	minimumDiskGiB?: number;
 	artifactSha256: string;
 	contextWindow: 131072;
 	maxTokens: 32768;
 	kvDtype: "bf16" | "rk2v4-e8";
 	speculation: "mtp3" | "none";
 	concurrency: 1;
+	preserveThinking?: boolean;
 	protocol: "openai-responses";
 	capabilities: ApplianceCapability[];
-	release?: "v0.1.0-qwen38-5090";
+	release?: string;
 	servedModel: "q38-ninfer";
 	aliases: string[];
 	defaultPort: number;
 	availability: ApplianceAvailability;
 	assets?: { runtime: ApplianceAsset; model: ApplianceAsset };
 	launch?: ApplianceLaunchDescriptor;
+	adapter?: ApplianceAdapterId;
+	supportStatus?: ApplianceSupportStatus;
+	supportOwner?: string;
+	limitations?: string[];
+	lifecycleCommands?: ApplianceAction[];
+	acceptanceReceipt?: { url: string; sha256: string };
+	gpuQualification?: { profile: string; receipt: { url: string; sha256: string }; status: ApplianceSupportStatus };
+	container?: ApplianceContainerDescriptor;
+	lifecycle?: ApplianceLifecycleDescriptor;
 }
 
 export interface ApplianceGpu {
@@ -116,12 +149,22 @@ export interface ApplianceInstallation {
 	installedAt: string;
 }
 
+export interface AppliancePendingTransaction {
+	action: "install" | "rollback";
+	stage: "before-predecessor-stop" | "after-predecessor-stop";
+	installationId: string;
+	profile: ApplianceProfileId;
+	predecessor?: ApplianceInstallation;
+	failureReceiptId?: string;
+}
+
 export interface ApplianceState {
 	schemaVersion: typeof APPLIANCE_STATE_SCHEMA_VERSION;
 	revision: number;
 	active?: ApplianceInstallation;
 	fleet?: ApplianceInstallation[];
 	rollbackTarget?: ApplianceInstallation;
+	pending?: AppliancePendingTransaction;
 	lastInstallReceiptId?: string;
 	lastRollbackReceiptId?: string;
 }
@@ -206,6 +249,7 @@ export interface AppliancePlatform {
 	}): Promise<ApplianceCandidate>;
 	startCandidate(candidate: ApplianceCandidate): Promise<void>;
 	stopCandidate(candidateHandle: string): Promise<void>;
+	stopInstallation(installation: ApplianceInstallation): Promise<void>;
 	startInstallation(installation: ApplianceInstallation, secret: string): Promise<void>;
 	probeHealth(candidate: ApplianceCandidate | ApplianceInstallation, secret: string): Promise<void>;
 	probeProtocol(candidate: ApplianceCandidate | ApplianceInstallation, secret: string): Promise<void>;

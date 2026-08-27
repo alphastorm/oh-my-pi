@@ -166,6 +166,7 @@
 - Added capability-gated, persisted NInfer Responses continuation with atomic session snapshots, exact request identity, and one-shot stale-chain recovery.
 - Added the registry-gated `omp appliance` lifecycle for checksum-pinned local NInfer services, read-only diagnostics, atomic route promotion, bounded qualification, and proven rollback.
 - Added `omp appliance support-bundle` for explicit, local-only JSON compatibility evidence with unavailable measurements reported as blocked rather than inferred.
+- Added exact OMP 18.0.9 SSH lifecycle delegation for managed appliance plan, install, quick benchmark, checkpoint, rollback, status, and sanitized support receipts without moving remote secrets or transaction state to the caller.
 
 ### Changed
 

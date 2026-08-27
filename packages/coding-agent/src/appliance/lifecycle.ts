@@ -29,6 +29,7 @@ export interface ApplianceLifecycleOptions {
 	store: ApplianceStore;
 	platform: AppliancePlatform;
 	profiles?: readonly ApplianceProfile[];
+	selectedProfileId?: ApplianceProfileId;
 	logger?: ApplianceLogger;
 	now?: () => Date;
 	newId?: () => string;
@@ -97,8 +98,24 @@ function publicHost(host: ApplianceHostFacts): Record<string, unknown> {
 	};
 }
 
-function planCommands(profile: ApplianceProfile): string[] {
-	if (!profile.assets || !profile.launch) return [];
+function planCommands(profile: ApplianceProfile, port: number): string[] {
+	if (!profile.assets) return [];
+	if (profile.container && profile.lifecycle) {
+		return [
+			`acquire image ${profile.container.imageReference}`,
+			`verify image ${profile.container.imageDigest}`,
+			`acquire model ${profile.assets.model.url}`,
+			`verify model sha256 ${profile.assets.model.sha256} bytes ${profile.assets.model.bytes ?? "unknown"}`,
+			`verify server sha256 ${profile.container.serverBinarySha256}`,
+			`verify config sha256 ${profile.container.configurationSha256}`,
+			`verify lifecycle sha256 ${profile.lifecycle.scriptSha256}`,
+			`publish 127.0.0.1:${port}:${profile.container.containerPort}`,
+			"prepare candidate through NInfer-owned lifecycle",
+			"health GET /v1/ninfer/status with bearer authentication",
+			"atomically promote appliance route and retain predecessor",
+		];
+	}
+	if (!profile.launch) return [];
 	return [
 		`download runtime ${profile.assets.runtime.url}`,
 		`verify runtime sha256 ${profile.assets.runtime.sha256}`,
@@ -144,6 +161,7 @@ export class ApplianceLifecycle {
 	readonly #store: ApplianceStore;
 	readonly #platform: AppliancePlatform;
 	readonly #profiles: readonly ApplianceProfile[];
+	readonly #selectedProfileId?: ApplianceProfileId;
 	readonly #logger: ApplianceLogger;
 	readonly #now: () => Date;
 	readonly #newId: () => string;
@@ -154,6 +172,7 @@ export class ApplianceLifecycle {
 		this.#store = options.store;
 		this.#platform = options.platform;
 		this.#profiles = options.profiles ?? APPLIANCE_PROFILES;
+		this.#selectedProfileId = options.selectedProfileId;
 		this.#logger = options.logger ?? NOOP_LOGGER;
 		this.#now = options.now ?? (() => new Date());
 		this.#newId = options.newId ?? randomUUID;
@@ -167,7 +186,7 @@ export class ApplianceLifecycle {
 			this.#store.readState(),
 			this.#platform.isPortOccupied(port),
 		]);
-		const detected = resolveApplianceProfile("qwen3.8", "auto", host, this.#profiles);
+		const detected = resolveApplianceProfile("qwen3.8", "auto", host, this.#profiles, this.#selectedProfileId);
 		const artifactChecks = detected.profile?.assets
 			? {
 					runtimePresent: await this.#platform.artifactPresent(detected.profile.assets.runtime),
@@ -208,16 +227,18 @@ export class ApplianceLifecycle {
 
 	async plan(model: string, gpu: ApplianceGpuSelector, requestedPort?: number): Promise<AppliancePlanResult> {
 		const [host, state] = await Promise.all([this.#platform.inspectHost(), this.#store.readState()]);
-		const resolution = resolveApplianceProfile(model, gpu, host, this.#profiles);
+		const resolution = resolveApplianceProfile(model, gpu, host, this.#profiles, this.#selectedProfileId);
 		const port = requestedPort ?? resolution.profile?.defaultPort ?? 8000;
 		const occupied = await this.#platform.isPortOccupied(port);
 		const idempotentTarget = Boolean(
 			resolution.profile && state.active && installationMatchesProfile(state.active, resolution.profile),
 		);
+		const ownedIncumbentPort = state.active?.route.port === port;
 		const blockers = [
 			...resolution.blockers,
 			...(resolution.profile?.availability.blockers ?? []),
-			...(occupied && !idempotentTarget ? [`Port ${port} is occupied`] : []),
+			...(occupied && !idempotentTarget && !ownedIncumbentPort ? [`Port ${port} is occupied`] : []),
+			...(state.pending?.action === "rollback" ? ["An interrupted rollback must be resolved before install"] : []),
 		];
 		const assets = resolution.profile?.assets;
 		const expectedBytes =
@@ -228,15 +249,15 @@ export class ApplianceLifecycle {
 			profile: resolution.profile,
 			supported: resolution.supported,
 			installable: Boolean(
-				resolution.profile && resolution.supported && isProfileInstallable(resolution.profile) && !occupied,
+				resolution.profile && resolution.supported && isProfileInstallable(resolution.profile) && (!occupied || ownedIncumbentPort),
 			),
 			blockers,
 			port,
 			priorProfile: state.active?.profile,
 			rollbackAvailable: Boolean(state.active),
 			expectedVramGiB: resolution.profile?.minVramGiB,
-			expectedDiskGiB: expectedBytes === undefined ? undefined : Math.round((expectedBytes / 1024 ** 3) * 10) / 10,
-			commands: resolution.profile ? planCommands(resolution.profile) : [],
+			expectedDiskGiB: resolution.profile?.minimumDiskGiB ?? (expectedBytes === undefined ? undefined : Math.round((expectedBytes / 1024 ** 3) * 10) / 10),
+			commands: resolution.profile ? planCommands(resolution.profile, port) : [],
 		};
 		return {
 			plan,
@@ -249,9 +270,12 @@ export class ApplianceLifecycle {
 				port,
 				priorProfile: plan.priorProfile,
 				rollbackAvailable: plan.rollbackAvailable,
+				expectedOutage: Boolean(state.active),
+				rollbackAction: state.active ? `restore installation ${state.active.installationId}` : "remove owned candidate",
 				expectedVramGiB: plan.expectedVramGiB,
 				expectedDiskGiB: plan.expectedDiskGiB,
 				commands: plan.commands,
+				pending: state.pending ? { action: state.pending.action, stage: state.pending.stage, failureReceiptId: state.pending.failureReceiptId } : undefined,
 			}),
 		};
 	}
@@ -261,11 +285,16 @@ export class ApplianceLifecycle {
 			const { plan } = await this.plan(model, gpu, requestedPort);
 			if (!plan.profile) return this.#persistBlockedInstall(plan.blockers);
 			const profile = plan.profile;
-			const state = await this.#store.readState();
-			if (state.active && installationMatchesProfile(state.active, profile)) {
-				try {
-					const secret = await this.#store.readSecret(state.active.route.secretRef);
-					await this.#platform.probeHealth(state.active, secret);
+			let state = await this.#store.readState();
+			const activeReconciled = await this.#reconcilePotentiallyCleanActive(state);
+			if (state.pending?.action === "rollback") {
+				return this.#persistBlockedInstall(["Interrupted rollback must be resolved before install"]);
+			}
+			if (state.pending && state.pending.profile !== profile.profile) {
+				return this.#persistBlockedInstall(["Interrupted install belongs to a different compatibility profile"]);
+			}
+			if (!state.pending && state.active && installationMatchesProfile(state.active, profile)) {
+				if (activeReconciled) {
 					const receipt = this.#receipt("install", "ok", {
 						profile: profile.profile,
 						release: profile.release,
@@ -274,23 +303,37 @@ export class ApplianceLifecycle {
 					});
 					await this.#store.writeReceipt(receipt);
 					return receipt;
-				} catch {
-					return this.#persistBlockedInstall([
-						"Existing matching appliance is unhealthy; incumbent was left unchanged",
-					]);
 				}
+				return this.#persistBlockedInstall([
+					"Existing matching appliance is unhealthy; incumbent was left unchanged",
+				]);
 			}
 			if (!plan.supported || !isProfileInstallable(profile) || plan.blockers.length > 0) {
 				return this.#persistBlockedInstall(plan.blockers);
 			}
-			if (!profile.assets || !profile.launch?.secretEnvironmentVariable.trim()) {
+			if (!profile.assets || (!profile.launch?.secretEnvironmentVariable.trim() && !(profile.container && profile.lifecycle))) {
 				return this.#persistBlockedInstall(["Released profile lacks authenticated runtime launch metadata"]);
 			}
-			if (await this.#platform.isPortOccupied(plan.port)) {
+			if (await this.#platform.isPortOccupied(plan.port) && state.active?.route.port !== plan.port) {
 				return this.#persistBlockedInstall([`Port ${plan.port} became occupied before candidate creation`]);
 			}
 
-			const installationId = this.#newId();
+			const installationId = state.pending?.installationId ?? this.#newId();
+			if (!state.pending) {
+				const pendingState: ApplianceState = {
+					...state,
+					revision: state.revision + 1,
+					pending: {
+						action: "install",
+						stage: "before-predecessor-stop",
+						installationId,
+						profile: profile.profile,
+						predecessor: state.active,
+					},
+				};
+				await this.#store.writeState(pendingState, state.revision);
+				state = pendingState;
+			}
 			let stage = "runtime-download";
 			let secretRef: string | undefined;
 			let candidate: ApplianceCandidate | undefined;
@@ -315,6 +358,17 @@ export class ApplianceLifecycle {
 					installationId,
 				});
 				if (!isLoopbackEndpoint(candidate.endpoint)) throw new Error("candidate-non-loopback");
+				if (state.pending?.stage === "before-predecessor-stop" && state.active) {
+					stage = "predecessor-stop";
+					await this.#platform.stopInstallation(state.active);
+					const stoppedState: ApplianceState = {
+						...state,
+						revision: state.revision + 1,
+						pending: { ...state.pending, stage: "after-predecessor-stop" },
+					};
+					await this.#store.writeState(stoppedState, state.revision);
+					state = stoppedState;
+				}
 				stage = "candidate-start";
 				await this.#platform.startCandidate(candidate);
 				stage = "candidate-health";
@@ -370,6 +424,7 @@ export class ApplianceLifecycle {
 								candidate !== undefined && candidate.installationId !== installation.installationId,
 						),
 						rollbackTarget: state.active,
+						pending: undefined,
 						lastInstallReceiptId: prepared.receiptId,
 						lastRollbackReceiptId: state.lastRollbackReceiptId,
 					},
@@ -414,14 +469,40 @@ export class ApplianceLifecycle {
 						await this.#platform.stopCandidate(candidate.handle);
 					} catch {}
 				}
-				if (secretRef) await this.#store.removeSecret(secretRef);
+				let incumbentRestored = state.pending?.stage !== "after-predecessor-stop";
+				if (!incumbentRestored && state.pending?.predecessor) {
+					try {
+						const predecessorSecret = await this.#store.readSecret(state.pending.predecessor.route.secretRef);
+						await this.#platform.startInstallation(state.pending.predecessor, predecessorSecret);
+						await this.#retryHealth(state.pending.predecessor, predecessorSecret);
+						incumbentRestored = true;
+					} catch {}
+				}
+				if (secretRef && incumbentRestored) await this.#store.removeSecret(secretRef);
 				const receipt = this.#receipt("install", "failed", {
 					profile: profile.profile,
 					failureStage: stage,
-					incumbentPreserved: true,
+					incumbentPreserved: incumbentRestored,
+					restorationFailed: !incumbentRestored,
 					routeChanged: false,
 				});
-				await this.#store.writeReceipt(receipt);
+				const failureReceiptId = await this.#store.writeReceipt(receipt);
+				if (state.pending) {
+					try {
+						await this.#store.writeState(
+							{
+								...state,
+								revision: state.revision + 1,
+								pending: {
+									...state.pending,
+									stage: incumbentRestored ? "before-predecessor-stop" : "after-predecessor-stop",
+									failureReceiptId,
+								},
+							},
+							state.revision,
+						);
+					} catch {}
+				}
 				return receipt;
 			}
 		});
@@ -571,7 +652,7 @@ export class ApplianceLifecycle {
 	}
 	async rollback(): Promise<ApplianceReceipt> {
 		return this.#store.withInstallLock(async () => {
-			const state = await this.#store.readState();
+			let state = await this.#store.readState();
 			if (!state.active || !state.rollbackTarget) {
 				const receipt = this.#receipt("rollback", "blocked", { blocker: "No preserved incumbent rollback target" });
 				await this.#store.writeReceipt(receipt);
@@ -579,10 +660,41 @@ export class ApplianceLifecycle {
 			}
 			const candidate = state.active;
 			const incumbent = state.rollbackTarget;
+			if (state.pending?.action === "install") {
+				const receipt = this.#receipt("rollback", "blocked", { blocker: "Interrupted install must be resolved before rollback" });
+				await this.#store.writeReceipt(receipt);
+				return receipt;
+			}
+			if (!state.pending) {
+				const pendingState: ApplianceState = {
+					...state,
+					revision: state.revision + 1,
+					pending: {
+						action: "rollback",
+						stage: "before-predecessor-stop",
+						installationId: candidate.installationId,
+						profile: candidate.profile,
+						predecessor: incumbent,
+					},
+				};
+				await this.#store.writeState(pendingState, state.revision);
+				state = pendingState;
+			}
 			let stage = "incumbent-proof";
 			let switched = false;
 			try {
 				const incumbentSecret = await this.#store.readSecret(incumbent.route.secretRef);
+				if (state.pending?.stage === "before-predecessor-stop") {
+					stage = "candidate-stop";
+					await this.#platform.stopInstallation(candidate);
+					const stoppedState: ApplianceState = {
+						...state,
+						revision: state.revision + 1,
+						pending: { ...state.pending, stage: "after-predecessor-stop" },
+					};
+					await this.#store.writeState(stoppedState, state.revision);
+					state = stoppedState;
+				}
 				await this.#platform.startInstallation(incumbent, incumbentSecret);
 				await this.#retryHealth(incumbent, incumbentSecret);
 				stage = "route-promotion";
@@ -592,6 +704,7 @@ export class ApplianceLifecycle {
 					active: incumbent,
 					fleet: state.fleet?.filter(candidate => candidate.installationId !== incumbent.installationId),
 					rollbackTarget: candidate,
+					pending: undefined,
 					lastInstallReceiptId: state.lastInstallReceiptId,
 					lastRollbackReceiptId: state.lastRollbackReceiptId,
 				};
@@ -647,13 +760,35 @@ export class ApplianceLifecycle {
 				}
 				return receipt;
 			} catch {
+				let candidateRestored = state.pending?.stage !== "after-predecessor-stop";
+				if (!candidateRestored) {
+					try {
+						const candidateSecret = await this.#store.readSecret(candidate.route.secretRef);
+						await this.#platform.startInstallation(candidate, candidateSecret);
+						await this.#retryHealth(candidate, candidateSecret);
+						candidateRestored = true;
+					} catch {}
+				}
 				const receipt = this.#receipt("rollback", "failed", {
 					failureStage: stage,
-					candidatePreserved: true,
-					routeRestored: false,
+					candidatePreserved: candidateRestored,
+					restorationFailed: !candidateRestored,
+					routeRestored: candidateRestored,
 					routeChanged: switched,
 				});
-				await this.#store.writeReceipt(receipt);
+				const failureReceiptId = await this.#store.writeReceipt(receipt);
+				if (state.pending) {
+					try {
+						await this.#store.writeState(
+							{
+								...state,
+								revision: state.revision + 1,
+								pending: candidateRestored ? undefined : { ...state.pending, failureReceiptId },
+							},
+							state.revision,
+						);
+					} catch {}
+				}
 				return receipt;
 			}
 		});
@@ -673,6 +808,24 @@ export class ApplianceLifecycle {
 				if (attempt === this.#probeAttempts) throw new Error("candidate-health-timeout");
 				await this.#sleep(1_000);
 			}
+		}
+	}
+
+	async #reconcilePotentiallyCleanActive(state: ApplianceState): Promise<boolean> {
+		if (state.pending || !state.active) return false;
+		let secret: string;
+		try {
+			secret = await this.#store.readSecret(state.active.route.secretRef);
+			await this.#platform.probeHealth(state.active, secret);
+			return true;
+		} catch {}
+		try {
+			secret ??= await this.#store.readSecret(state.active.route.secretRef);
+			await this.#platform.startInstallation(state.active, secret);
+			await this.#retryHealth(state.active, secret);
+			return true;
+		} catch {
+			return false;
 		}
 	}
 
@@ -706,6 +859,7 @@ export class ApplianceLifecycle {
 				{
 					...prior,
 					revision: currentRevision + 1,
+					pending: undefined,
 					lastInstallReceiptId: preparedReceiptId,
 				},
 				currentRevision,
@@ -821,7 +975,10 @@ export class ApplianceLifecycle {
 			runtimeRelease: active?.release ?? null,
 			modelSha256: active?.modelSha256 ?? null,
 			profile: active?.profile ?? null,
+			adapter: profile?.adapter ?? null,
+			supportStatus: profile?.supportStatus ?? null,
 			context: profile?.contextWindow ?? null,
+			transaction: state.pending ? { action: state.pending.action, stage: state.pending.stage } : null,
 			verdicts: {
 				protocol: protocolTool,
 				tools: protocolTool,

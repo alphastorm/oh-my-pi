@@ -1319,6 +1319,33 @@ describe("executeBash :async: background retention", () => {
 		if (fs.existsSync(tmp)) removeSyncWithRetries(tmp);
 	});
 
+	it("settles an exited command before background bookkeeping completes", async () => {
+		vi.spyOn(piNatives.Shell.prototype, "run").mockResolvedValue({
+			exitCode: 0,
+			cancelled: false,
+			timedOut: false,
+		});
+		const backgroundCount = Promise.withResolvers<number>();
+		vi.spyOn(piNatives.Shell.prototype, "liveBackgroundJobCount").mockReturnValue(
+			backgroundCount.promise,
+		);
+
+		const raced = await Promise.race([
+			executeBash("true", {
+				sessionKey: "bookkeeping-probe:async:job1",
+				cwd: tmp,
+			}).then((result) => ({ kind: "result" as const, result })),
+			Bun.sleep(500).then(() => ({ kind: "timeout" as const })),
+		]);
+
+		expect(raced.kind).toBe("result");
+		if (raced.kind === "result") {
+			expect(raced.result.exitCode).toBe(0);
+			expect(raced.result.cancelled).toBe(false);
+		}
+		backgroundCount.resolve(0);
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"keeps a per-job :async: shell's plain-`&` background process alive across turns",
 		async () => {

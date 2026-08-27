@@ -438,5 +438,30 @@ describe("active appliance model route", () => {
 			error = caught;
 		}
 		expect(error instanceof Error ? error.message : "").toContain("Unsupported appliance state schema");
+
+		const unavailable: unknown[] = [];
+		const skipped = await registerActiveApplianceRoute(
+			new CapturingRegistry(),
+			new CapturingSettings(),
+			temp.path(),
+			{
+				allowUnavailable: true,
+				onUnavailable: caught => unavailable.push(caught),
+			},
+		);
+		expect(skipped).toBeUndefined();
+		expect(unavailable).toHaveLength(1);
+		expect(unavailable[0] instanceof Error ? unavailable[0].message : "").toContain(
+			"Unsupported appliance state schema",
+		);
+
+		await expect(
+			registerActiveApplianceRoute(
+				new CapturingRegistry(),
+				new CapturingSettings(),
+				temp.path(),
+				{ allowUnavailable: true, requestedAlias: "local-max" },
+			),
+		).rejects.toThrow("Unsupported appliance state schema");
 	});
 });

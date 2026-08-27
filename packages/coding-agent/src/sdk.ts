@@ -263,6 +263,16 @@ function isNInferStatefulResponsesModel(model: Model): model is Model<"openai-re
 	);
 }
 
+function isApplianceModelSelector(value: string | undefined): boolean {
+	if (!value) return false;
+	return value.split(",").some(selector => {
+		const normalized = selector.trim();
+		if (normalized.startsWith("ninfer-appliance/")) return true;
+		const id = normalized.split("/").at(-1)?.split(":")[0];
+		return id !== undefined && /^(?:local-(?:max|fast|batch)|qwen38-(?:5090|4090))$/.test(id);
+	});
+}
+
 function buildLateDiagnosticsBatchMessage(
 	entries: DeferredDiagnosticsEntry[],
 ): CustomMessage<LateDiagnosticsDetails> | null {
@@ -1347,6 +1357,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			requestedId && /^(?:local-(?:max|fast|batch)|qwen38-(?:5090|4090))$/.test(requestedId)
 				? requestedId
 				: undefined;
+		const explicitSelector = options.model
+			? `${options.model.provider}/${options.model.id}`
+			: requestedPattern;
+		const applianceRouteRequired = isApplianceModelSelector(
+			explicitSelector ?? settings.getModelRole("default"),
+		);
 		const backgroundPlacement =
 			requestedAlias === "local-batch" ||
 			(options.taskDepth ?? 0) > 0 ||
@@ -1361,6 +1377,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				options.applianceColdLocalFallback ?? settings.get("appliance.coldLocalFallback"),
 			foregroundReservation:
 				options.applianceForegroundReservation ?? settings.get("appliance.foregroundReservation"),
+			allowUnavailable: !applianceRouteRequired,
+			onUnavailable: error => {
+				logger.warn("Local NInfer appliance route unavailable; continuing without it", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			},
 			sessionManager,
 			sessionId: options.providerSessionId ?? sessionManager.getSessionId(),
 		});

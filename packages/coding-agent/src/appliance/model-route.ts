@@ -30,6 +30,8 @@ export interface ApplianceRouteSelectionOptions {
 	vision?: boolean;
 	coldLocalFallback?: boolean;
 	foregroundReservation?: boolean;
+	allowUnavailable?: boolean;
+	onUnavailable?: (error: unknown) => void;
 	sessionManager?: SessionManager;
 	sessionId?: string;
 	fetch?: FetchImpl;
@@ -275,7 +277,7 @@ function registrationReceipt(
 	};
 }
 
-/** Select and register one authenticated local endpoint for this session. Never falls through to cloud on fleet failure. */
+/** Select and register one authenticated local endpoint. Explicit local and affined sessions fail closed. */
 export async function registerActiveApplianceRoute(
 	modelRegistry: ApplianceRouteModelRegistry,
 	settings: ApplianceRouteSettings,
@@ -283,40 +285,50 @@ export async function registerActiveApplianceRoute(
 	options: ApplianceRouteSelectionOptions = {},
 	profiles: readonly ApplianceProfile[] = APPLIANCE_PROFILES,
 ): Promise<ApplianceRouteRegistration | undefined> {
-	const store = new FileApplianceStore(agentDir);
-	const state = await store.readState();
-	if (!state.active) return undefined;
-	const installations = [state.active, ...(state.fleet ?? [])];
-	const validated = (await validateInstallations(installations, store, profiles)).filter(candidate =>
-		supportsRequest(candidate, options),
-	);
-	if (validated.length === 0) throw new Error("No compatible local NInfer appliance is configured for this request");
-	const observations = await Promise.all(validated.map(candidate => observeEndpoint(candidate, agentDir, options)));
-	const placement = options.placement ?? "foreground";
 	const affinity = readAffinity(options);
-	let selected: EndpointObservation | undefined;
-	let reason: ApplianceSelectionReason;
-	let fallbackReason: "warm_owner_unavailable" | undefined;
-	if (affinity) {
-		selected = observations.find(candidate => candidate.identity?.fingerprint === affinity.endpointFingerprint);
-		if (selected) {
-			reason = "warm_owner";
-		} else {
-			if (!options.coldLocalFallback) {
-				throw new Error(
-					"Warm NInfer session owner is unavailable or changed; cold local fallback is disabled",
-				);
-			}
-			selected = selectFresh(observations, placement, options.foregroundReservation ?? true);
-			if (!selected) throw new Error("Warm NInfer session owner is unavailable and no cold local fallback is healthy");
-			reason = "cold_local_fallback";
-			fallbackReason = "warm_owner_unavailable";
+	try {
+		const store = new FileApplianceStore(agentDir);
+		const state = await store.readState();
+		if (!state.active) return undefined;
+		const installations = [state.active, ...(state.fleet ?? [])];
+		const validated = (await validateInstallations(installations, store, profiles)).filter(candidate =>
+			supportsRequest(candidate, options),
+		);
+		if (validated.length === 0) {
+			throw new Error("No compatible local NInfer appliance is configured for this request");
 		}
-	} else {
-		selected = selectFresh(observations, placement, options.foregroundReservation ?? true);
-		if (!selected) throw new Error("No healthy compatible local NInfer appliance is available");
-		reason = placement === "foreground" ? "foreground_preference" : "background_preference";
+		const observations = await Promise.all(validated.map(candidate => observeEndpoint(candidate, agentDir, options)));
+		const placement = options.placement ?? "foreground";
+		let selected: EndpointObservation | undefined;
+		let reason: ApplianceSelectionReason;
+		let fallbackReason: "warm_owner_unavailable" | undefined;
+		if (affinity) {
+			selected = observations.find(candidate => candidate.identity?.fingerprint === affinity.endpointFingerprint);
+			if (selected) {
+				reason = "warm_owner";
+			} else {
+				if (!options.coldLocalFallback) {
+					throw new Error(
+						"Warm NInfer session owner is unavailable or changed; cold local fallback is disabled",
+					);
+				}
+				selected = selectFresh(observations, placement, options.foregroundReservation ?? true);
+				if (!selected) {
+					throw new Error("Warm NInfer session owner is unavailable and no cold local fallback is healthy");
+				}
+				reason = "cold_local_fallback";
+				fallbackReason = "warm_owner_unavailable";
+			}
+		} else {
+			selected = selectFresh(observations, placement, options.foregroundReservation ?? true);
+			if (!selected) throw new Error("No healthy compatible local NInfer appliance is available");
+			reason = placement === "foreground" ? "foreground_preference" : "background_preference";
+		}
+		registerSelected(modelRegistry, settings, selected);
+		return registrationReceipt(selected, placement, reason, fallbackReason);
+	} catch (error) {
+		if (!options.allowUnavailable || options.requestedAlias || affinity) throw error;
+		options.onUnavailable?.(error);
+		return undefined;
 	}
-	registerSelected(modelRegistry, settings, selected);
-	return registrationReceipt(selected, placement, reason, fallbackReason);
 }

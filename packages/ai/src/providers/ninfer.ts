@@ -255,8 +255,27 @@ function endpointFingerprint(baseUrl: string, status: NInferStatusV1): string {
 }
 
 async function readBoundedJson(response: Response, error: (message: string) => Error): Promise<unknown> {
-	const body = await response.text();
-	if (Buffer.byteLength(body) > MAX_STATUS_BYTES) throw error("NInfer response exceeded the size limit");
+	const contentLength = Number(response.headers.get("content-length"));
+	if (Number.isFinite(contentLength) && contentLength > MAX_STATUS_BYTES) {
+		await response.body?.cancel().catch(() => {});
+		throw error("NInfer response exceeded the size limit");
+	}
+	if (!response.body) throw error("NInfer returned invalid JSON");
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let body = "";
+	let bytes = 0;
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		bytes += value.byteLength;
+		if (bytes > MAX_STATUS_BYTES) {
+			await reader.cancel().catch(() => {});
+			throw error("NInfer response exceeded the size limit");
+		}
+		body += decoder.decode(value, { stream: true });
+	}
+	body += decoder.decode();
 	try {
 		return JSON.parse(body);
 	} catch {

@@ -179,4 +179,59 @@ describe("local appliance platform", () => {
 			globalThis.fetch = originalFetch;
 		}
 	});
+
+	it("bounds the complete Responses stream rather than only the current event buffer", async () => {
+		using temp = TempDir.createSync("@omp-appliance-platform-stream-limit-");
+		const platform = new LocalAppliancePlatform(temp.path());
+		const originalFetch = globalThis.fetch;
+		const encoder = new TextEncoder();
+		const event = encoder.encode(
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "x".repeat(64 * 1024) })}\n\n`,
+		);
+		let requestNumber = 0;
+		let pulls = 0;
+		let cancelled = false;
+
+		globalThis.fetch = (async (): Promise<Response> => {
+			requestNumber += 1;
+			if (requestNumber === 1) {
+				return Response.json({
+					output: [{ type: "function_call", name: "echo", arguments: JSON.stringify({ value: "ok" }) }],
+				});
+			}
+			if (requestNumber === 2) {
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						pull(controller) {
+							pulls += 1;
+							if (pulls > 100) {
+								controller.close();
+								return;
+							}
+							controller.enqueue(event);
+						},
+						cancel() {
+							cancelled = true;
+						},
+					}),
+					{ headers: { "content-type": "text/event-stream" } },
+				);
+			}
+			return new Response(null, { status: 503 });
+		}) as unknown as typeof fetch;
+
+		try {
+			const result = await platform.quickQualification(
+				{ candidateId: "candidate", handle: "candidates/candidate", endpoint: "http://127.0.0.1:8000", port: 8000 },
+				"private-test-secret",
+			);
+
+			expect(result.ok).toBe(false);
+			expect(result.cases.find(testCase => testCase.name === "short-decode")?.ok).toBe(false);
+			expect(cancelled).toBe(true);
+			expect(pulls).toBeLessThan(100);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
 });

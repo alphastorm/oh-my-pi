@@ -4,7 +4,7 @@ import {
 	isProfileInstallable,
 	resolveApplianceProfile,
 } from "@oh-my-pi/pi-coding-agent/appliance/registry";
-import type { ApplianceHostFacts } from "@oh-my-pi/pi-coding-agent/appliance/types";
+import type { ApplianceHostFacts, ApplianceProfile } from "@oh-my-pi/pi-coding-agent/appliance/types";
 
 function host(overrides: Partial<ApplianceHostFacts> = {}): ApplianceHostFacts {
 	return {
@@ -67,6 +67,35 @@ describe("appliance profile registry", () => {
 			"stateful-responses",
 			"durable-checkpoint",
 		]);
+	});
+
+	it("requires preview client acceptance independently of GPU qualification", () => {
+		const base = APPLIANCE_PROFILES[0]!;
+		const acceptance = { url: "https://example.invalid/client-acceptance.json", sha256: "a".repeat(64) };
+		const gpuReceipt = { url: "https://example.invalid/gpu-qualification.json", sha256: "b".repeat(64) };
+		const preview: ApplianceProfile = {
+			...base,
+			supportStatus: "preview",
+			availability: { installable: true, channel: "beta", blockers: [], qualificationReceipt: acceptance },
+			acceptanceReceipt: acceptance,
+			gpuQualification: { profile: "rtx5090", receipt: gpuReceipt, status: "qualified" },
+			assets: {
+				runtime: { kind: "runtime", url: "https://example.invalid/runtime", sha256: "c".repeat(64) },
+				model: { kind: "model", url: "https://example.invalid/model", sha256: base.artifactSha256 },
+			},
+			launch: { executable: "runtime", args: [], secretEnvironmentVariable: "NINFER_API_KEY" },
+		};
+		expect(isProfileInstallable({
+			...preview,
+			availability: { installable: true, channel: "beta", blockers: [] },
+			acceptanceReceipt: undefined,
+		})).toBe(false);
+		expect(isProfileInstallable({ ...preview, gpuQualification: undefined })).toBe(false);
+		expect(isProfileInstallable(preview)).toBe(true);
+		expect(isProfileInstallable({
+			...preview,
+			gpuQualification: { ...preview.gpuQualification!, status: "blocked" },
+		})).toBe(false);
 	});
 
 	it("selects supported hardware and explains unsupported hosts", () => {

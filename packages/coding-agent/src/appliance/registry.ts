@@ -87,29 +87,39 @@ function detectedSelector(host: ApplianceHostFacts): Exclude<ApplianceGpuSelecto
 
 function hostBlockers(profile: ApplianceProfile, host: ApplianceHostFacts): string[] {
 	const blockers: string[] = [];
+	if (profile.adapter === "windows-docker-local" && host.os !== "win32") {
+		blockers.push(`windows-docker-local requires native Windows; detected ${host.os}`);
+	}
+	if (profile.adapter === "linux-docker-local" && host.os !== "linux") {
+		blockers.push(`linux-docker-local requires native Linux; detected ${host.os}`);
+	}
+	if (profile.adapter === "darwin-remote-ssh" && host.os !== "darwin") {
+		blockers.push(`darwin-remote-ssh requires macOS; detected ${host.os}`);
+	}
 	if (profile.profile === "rtx5090-linux" && host.os !== "linux") {
 		blockers.push(`rtx5090-linux requires Linux; detected ${host.os}`);
 	}
 	if (profile.profile === "rtx4090-windows" && host.os !== "win32") {
 		blockers.push(`rtx4090-windows requires Windows; detected ${host.os}`);
 	}
-	const compatibleGpu = host.gpus.find(gpu => {
+	const compatibleGpu = profile.adapter === "darwin-remote-ssh" ? undefined : host.gpus.find(gpu => {
 		const model = gpu.model.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
-		return profile.profile === "rtx5090-linux" ? model.includes("5090") : model.includes("4090");
+		return profile.profile === "rtx4090-windows" ? model.includes("4090") : model.includes("5090");
 	});
-	if (!compatibleGpu) blockers.push(`No ${profile.profile === "rtx5090-linux" ? "RTX 5090" : "RTX 4090"} detected`);
-	else {
+	if (profile.adapter !== "darwin-remote-ssh" && !compatibleGpu) {
+		blockers.push(`No ${profile.profile === "rtx4090-windows" ? "RTX 4090" : "RTX 5090"} detected`);
+	} else if (compatibleGpu) {
 		if (compatibleGpu.vramGiB < profile.minVramGiB) {
 			blockers.push(`GPU has ${compatibleGpu.vramGiB} GiB VRAM; ${profile.minVramGiB} GiB required`);
 		}
-		const expectedComputeCapability = profile.profile === "rtx5090-linux" ? "12.0" : "8.9";
+		const expectedComputeCapability = profile.profile === "rtx4090-windows" ? "8.9" : "12.0";
 		if (compatibleGpu.computeCapability && compatibleGpu.computeCapability !== expectedComputeCapability) {
 			blockers.push(
 				`GPU compute capability ${compatibleGpu.computeCapability}; ${expectedComputeCapability} required`,
 			);
 		}
 	}
-	if (profile.profile === "rtx5090-linux") {
+	if (profile.profile !== "rtx4090-windows" && profile.adapter !== "darwin-remote-ssh") {
 		if (!host.dockerAvailable) blockers.push("Docker is unavailable");
 		if (!host.nvidiaContainerRuntimeAvailable) blockers.push("NVIDIA Container Toolkit is unavailable");
 	}
@@ -117,6 +127,9 @@ function hostBlockers(profile: ApplianceProfile, host: ApplianceHostFacts): stri
 		blockers.push("Required Windows NInfer runtime prerequisites are unavailable");
 	}
 	if (!host.secretStorageAvailable) blockers.push("Secure appliance secret storage is unavailable");
+	if (profile.minimumDiskGiB !== undefined && (host.freeDiskGiB === undefined || host.freeDiskGiB < profile.minimumDiskGiB)) {
+		blockers.push(`Host has ${host.freeDiskGiB ?? "unknown"} GiB free disk; ${profile.minimumDiskGiB} GiB required`);
+	}
 	return blockers;
 }
 
@@ -125,8 +138,15 @@ export function resolveApplianceProfile(
 	gpu: ApplianceGpuSelector,
 	host: ApplianceHostFacts,
 	profiles: readonly ApplianceProfile[] = APPLIANCE_PROFILES,
+	preferredProfile?: ApplianceProfileId,
 ): ApplianceProfileResolution {
 	if (model !== "qwen3.8") return { supported: false, blockers: [`Unsupported appliance model: ${model}`] };
+	if (preferredProfile) {
+		const profile = profiles.find(candidate => candidate.profile === preferredProfile);
+		if (!profile) return { supported: false, blockers: [`Compatibility profile ${preferredProfile} is unavailable`] };
+		const blockers = hostBlockers(profile, host);
+		return { profile, supported: blockers.length === 0, blockers };
+	}
 	const selected = gpu === "auto" ? detectedSelector(host) : gpu;
 	if (!selected) {
 		return {
@@ -147,9 +167,10 @@ export function isProfileInstallable(profile: ApplianceProfile): boolean {
 	return Boolean(
 		profile.availability.installable &&
 			profile.availability.qualificationReceipt &&
+			(profile.supportStatus !== "preview" || profile.gpuQualification?.status === "qualified") &&
 			profile.assets?.runtime &&
 			profile.assets.model &&
-			profile.launch,
+			(profile.launch || (profile.container && profile.lifecycle)),
 	);
 }
 

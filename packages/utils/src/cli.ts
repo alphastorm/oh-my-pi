@@ -54,6 +54,7 @@ export interface FlagDescriptor<K extends "string" | "boolean" | "integer" = "st
 	multiple?: boolean;
 	options?: readonly string[];
 	required?: boolean;
+	hidden?: boolean;
 }
 
 export interface ArgDescriptor {
@@ -71,6 +72,7 @@ interface FlagInput {
 	multiple?: boolean;
 	options?: readonly string[];
 	required?: boolean;
+	hidden?: boolean;
 }
 
 interface ArgInput {
@@ -339,7 +341,7 @@ function formatUsageArgs(Cmd: CommandCtor): string {
 
 /** Build the single USAGE line for a command (without the leading label). */
 export function commandUsageLine(bin: string, id: string, Cmd: CommandCtor): string {
-	const hasFlags = Object.keys(Cmd.flags ?? {}).length > 0;
+	const hasFlags = Object.values(Cmd.flags ?? {}).some(flag => !flag.hidden);
 	return `$ ${bin} ${id}${formatUsageArgs(Cmd)}${hasFlags ? " [FLAGS]" : ""}`;
 }
 
@@ -372,7 +374,7 @@ function renderCommandBody(lines: string[], command: CommandMetadata): void {
 	}
 
 	// Flags
-	const flagEntries = Object.entries(flagDefs);
+	const flagEntries = Object.entries(flagDefs).filter(([, descriptor]) => !descriptor.hidden);
 	if (flagEntries.length > 0) {
 		lines.push("FLAGS");
 		const formatted: [string, string][] = [];

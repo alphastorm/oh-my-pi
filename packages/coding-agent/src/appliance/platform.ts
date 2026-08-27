@@ -497,6 +497,10 @@ export class LocalAppliancePlatform implements AppliancePlatform {
 		await fs.rm(pidFile, { force: true });
 	}
 
+	async stopInstallation(installation: ApplianceInstallation): Promise<void> {
+		await this.stopCandidate(installation.candidateHandle);
+	}
+
 	async startInstallation(installation: ApplianceInstallation, secret: string): Promise<void> {
 		await this.#startHandle(installation.candidateHandle, secret);
 	}

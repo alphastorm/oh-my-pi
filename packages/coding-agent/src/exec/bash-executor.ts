@@ -172,29 +172,31 @@ const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
 // (#10308). The backing timer is unref'd so it never keeps the process alive.
 const QUARANTINE_CLEANUP_TIMEOUT_MS = 30_000;
 
-async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
-	let live: number;
-	try {
-		live = await shell.liveBackgroundJobCount();
-	} catch {
-		return;
-	}
-	if (live <= 0) return;
-	retainedShells.add(shell);
-	const interval = setInterval(() => {
-		void shell
-			.liveBackgroundJobCount()
-			.then(remaining => {
-				if (remaining > 0) return;
-				clearInterval(interval);
-				retainedShells.delete(shell);
-			})
-			.catch(() => {
-				clearInterval(interval);
-				retainedShells.delete(shell);
-			});
-	}, RETAIN_REAP_INTERVAL_MS);
-	interval.unref?.();
+function retainShellWithLiveBackgroundJobs(shell: Shell): void {
+	// Background-process bookkeeping must never delay settlement of the command
+	// that already exited. The pending query itself retains the Shell reference;
+	// once it answers, keep the Shell only when it owns a live background child.
+	void shell
+		.liveBackgroundJobCount()
+		.then(live => {
+			if (live <= 0) return;
+			retainedShells.add(shell);
+			const interval = setInterval(() => {
+				void shell
+					.liveBackgroundJobCount()
+					.then(remaining => {
+						if (remaining > 0) return;
+						clearInterval(interval);
+						retainedShells.delete(shell);
+					})
+					.catch(() => {
+						clearInterval(interval);
+						retainedShells.delete(shell);
+					});
+			}, RETAIN_REAP_INTERVAL_MS);
+			interval.unref?.();
+		})
+		.catch(() => undefined);
 }
 
 /**
@@ -787,7 +789,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				// turns; it is reaped once its last job exits and still dies with the
 				// harness. Skip on resetSession (cancel/error) — those tear down.
 				if (!resetSession && shellSession) {
-					await retainShellWithLiveBackgroundJobs(shellSession);
+					retainShellWithLiveBackgroundJobs(shellSession);
 				}
 			}
 		}

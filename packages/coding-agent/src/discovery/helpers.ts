@@ -845,8 +845,14 @@ export async function resolveActiveProjectRegistryPath(
 	// User-home and shared OS-temporary roots are config/runtime boundaries, not project roots.
 	const resolvedCwd = path.resolve(cwd);
 	const boundaries = new Set([path.resolve(projectBoundary)]);
-	const tempBoundary = path.resolve(os.tmpdir());
-	if (resolvedCwd === tempBoundary || resolvedCwd.startsWith(tempBoundary + path.sep)) boundaries.add(tempBoundary);
+	const temporaryRoots =
+		process.platform === "win32"
+			? [os.tmpdir()]
+			: [os.tmpdir(), "/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp"];
+	for (const temporaryRoot of temporaryRoots) {
+		const boundary = path.resolve(temporaryRoot);
+		if (resolvedCwd === boundary || resolvedCwd.startsWith(boundary + path.sep)) boundaries.add(boundary);
+	}
 	let dir = resolvedCwd;
 	while (!boundaries.has(dir)) {
 		try {

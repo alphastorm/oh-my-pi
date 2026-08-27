@@ -1,5 +1,5 @@
-import type { NInferCheckpointOperation } from "@oh-my-pi/pi-ai/providers/ninfer";
 import { randomUUID } from "node:crypto";
+import type { NInferCheckpointOperation } from "@oh-my-pi/pi-ai/providers/ninfer";
 import {
 	APPLIANCE_PROFILES,
 	installationMatchesProfile,
@@ -365,7 +365,10 @@ export class ApplianceLifecycle {
 						schemaVersion: state.schemaVersion,
 						revision: state.revision + 1,
 						active: installation,
-						fleet: state.fleet,
+						fleet: [state.active, ...(state.fleet ?? [])].filter(
+							(candidate): candidate is ApplianceInstallation =>
+								candidate !== undefined && candidate.installationId !== installation.installationId,
+						),
 						rollbackTarget: state.active,
 						lastInstallReceiptId: prepared.receiptId,
 						lastRollbackReceiptId: state.lastRollbackReceiptId,
@@ -434,7 +437,10 @@ export class ApplianceLifecycle {
 			installations.map(async installation => {
 				try {
 					const secret = await this.#store.readSecret(installation.route.secretRef);
-					return { profile: installation.profile, endpoint: publicEndpointStatus(await this.#platform.readEndpointStatus(installation, secret)) };
+					return {
+						profile: installation.profile,
+						endpoint: publicEndpointStatus(await this.#platform.readEndpointStatus(installation, secret)),
+					};
 				} catch {
 					return { profile: installation.profile, endpoint: { reachable: false } };
 				}
@@ -489,71 +495,79 @@ export class ApplianceLifecycle {
 		}
 	}
 
-
 	async checkpoint(
 		operation: NInferCheckpointOperation,
 		sessionSha256: string,
 		profileId?: ApplianceProfileId,
 	): Promise<ApplianceReceipt> {
-		const state = await this.#store.readState();
-		const installations = state.active ? [state.active, ...(state.fleet ?? [])] : [];
-		const checkpointInstallations = installations.filter(candidate =>
-			this.#profiles
-				.find(profile => profile.profile === candidate.profile)
-				?.capabilities.includes("durable-checkpoint"),
-		);
-		const installation = profileId
-			? checkpointInstallations.find(candidate => candidate.profile === profileId)
-			: checkpointInstallations.length === 1
-				? checkpointInstallations[0]
+		return this.#store.withInstallLock(async () => {
+			const state = await this.#store.readState();
+			const installations = state.active ? [state.active, ...(state.fleet ?? [])] : [];
+			const checkpointInstallations = installations.filter(candidate =>
+				this.#profiles
+					.find(profile => profile.profile === candidate.profile)
+					?.capabilities.includes("durable-checkpoint"),
+			);
+			const matchingProfileInstallations = profileId
+				? checkpointInstallations.filter(candidate => candidate.profile === profileId)
+				: [];
+			const installation = profileId
+				? matchingProfileInstallations.length === 1
+					? matchingProfileInstallations[0]
+					: undefined
+				: checkpointInstallations.length === 1
+					? checkpointInstallations[0]
+					: undefined;
+			const profile = installation
+				? this.#profiles.find(candidate => candidate.profile === installation.profile)
 				: undefined;
-		const profile = installation
-			? this.#profiles.find(candidate => candidate.profile === installation.profile)
-			: undefined;
-		if (!installation || !profile?.capabilities.includes("durable-checkpoint")) {
-			const receipt = this.#receipt("checkpoint", "blocked", {
-				operation,
-				sessionSha256,
-				profile: profileId,
-				blocker:
-					!profileId && checkpointInstallations.length > 1
-						? "Multiple appliance profiles expose durable checkpoints; specify --profile"
-						: "No configured appliance profile exposes durable checkpoints",
-			});
-			await this.#store.writeReceipt(receipt);
-			return receipt;
-		}
-		try {
-			const secret = await this.#store.readSecret(installation.route.secretRef);
-			const result = await this.#platform.checkpoint(installation, secret, operation, sessionSha256);
-			const receiptStatus =
-				result.state === "disabled"
-					? "blocked"
-					: result.state === "incompatible" || result.state === "corrupt"
-						? "failed"
-						: "ok";
-			const receipt = this.#receipt("checkpoint", receiptStatus, {
-				operation,
-				sessionSha256,
-				profile: installation.profile,
-				state: result.state,
-				bytes: result.bytes,
-				frontierTokens: result.frontierTokens,
-				restoredTokens: result.restoredTokens,
-				responseRecords: result.responseRecords,
-			});
-			await this.#store.writeReceipt(receipt);
-			return receipt;
-		} catch {
-			const receipt = this.#receipt("checkpoint", "failed", {
-				operation,
-				sessionSha256,
-				profile: installation.profile,
-				failureStage: "authenticated-checkpoint-request",
-			});
-			await this.#store.writeReceipt(receipt);
-			return receipt;
-		}
+			if (!installation || !profile?.capabilities.includes("durable-checkpoint")) {
+				const receipt = this.#receipt("checkpoint", "blocked", {
+					operation,
+					sessionSha256,
+					profile: profileId,
+					blocker:
+						profileId && matchingProfileInstallations.length > 1
+							? `Multiple ${profileId} installations expose durable checkpoints; repair appliance state`
+							: !profileId && checkpointInstallations.length > 1
+								? "Multiple appliance profiles expose durable checkpoints; specify --profile"
+								: "No configured appliance profile exposes durable checkpoints",
+				});
+				await this.#store.writeReceipt(receipt);
+				return receipt;
+			}
+			try {
+				const secret = await this.#store.readSecret(installation.route.secretRef);
+				const result = await this.#platform.checkpoint(installation, secret, operation, sessionSha256);
+				const receiptStatus =
+					result.state === "disabled"
+						? "blocked"
+						: result.state === "incompatible" || result.state === "corrupt"
+							? "failed"
+							: "ok";
+				const receipt = this.#receipt("checkpoint", receiptStatus, {
+					operation,
+					sessionSha256,
+					profile: installation.profile,
+					state: result.state,
+					bytes: result.bytes,
+					frontierTokens: result.frontierTokens,
+					restoredTokens: result.restoredTokens,
+					responseRecords: result.responseRecords,
+				});
+				await this.#store.writeReceipt(receipt);
+				return receipt;
+			} catch {
+				const receipt = this.#receipt("checkpoint", "failed", {
+					operation,
+					sessionSha256,
+					profile: installation.profile,
+					failureStage: "authenticated-checkpoint-request",
+				});
+				await this.#store.writeReceipt(receipt);
+				return receipt;
+			}
+		});
 	}
 	async rollback(): Promise<ApplianceReceipt> {
 		return this.#store.withInstallLock(async () => {
@@ -576,7 +590,7 @@ export class ApplianceLifecycle {
 					schemaVersion: state.schemaVersion,
 					revision: state.revision + 1,
 					active: incumbent,
-					fleet: state.fleet,
+					fleet: state.fleet?.filter(candidate => candidate.installationId !== incumbent.installationId),
 					rollbackTarget: candidate,
 					lastInstallReceiptId: state.lastInstallReceiptId,
 					lastRollbackReceiptId: state.lastRollbackReceiptId,
@@ -618,14 +632,19 @@ export class ApplianceLifecycle {
 					candidateDiagnosticsRetained: true,
 				});
 				await this.#store.writeReceipt(receipt);
-				await this.#store.writeState(
-					{
-						...promoted,
-						revision: promoted.revision + 1,
-						lastRollbackReceiptId: receipt.receiptId,
-					},
-					promoted.revision,
-				);
+				try {
+					await this.#store.writeState(
+						{
+							...promoted,
+							revision: promoted.revision + 1,
+							lastRollbackReceiptId: receipt.receiptId,
+						},
+						promoted.revision,
+					);
+				} catch {
+					// The rollback result is already durable in its receipt. Support bundles reconcile
+					// this optional state pointer from receipts instead of misreporting the route outcome.
+				}
 				return receipt;
 			} catch {
 				const receipt = this.#receipt("rollback", "failed", {
@@ -789,7 +808,10 @@ export class ApplianceLifecycle {
 		if (active && Object.values(metrics).some(value => value === null)) {
 			blockers.push("Quick qualification does not expose all support-bundle performance metrics");
 		}
-		const rollback = state.lastRollbackReceiptId ? "passed" : null;
+		const rollback =
+			state.lastRollbackReceiptId || (state.active && (await this.#store.hasSuccessfulRollbackReceipt()))
+				? "passed"
+				: null;
 		if (active && rollback === null) blockers.push("No successful rollback receipt is recorded");
 
 		const receipt = this.#receipt("support-bundle", blockers.length === 0 ? "ok" : "blocked", {

@@ -229,7 +229,10 @@ describe("active appliance model route", () => {
 		const profile = publishedProfile();
 		const store = new FileApplianceStore(temp.path());
 		const secretRef = await store.createSecret("install-1");
-		await store.writeState({ schemaVersion: 1, revision: 1, active: installation(profile, secretRef, 8000, "install-1") }, 0);
+		await store.writeState(
+			{ schemaVersion: 1, revision: 1, active: installation(profile, secretRef, 8000, "install-1") },
+			0,
+		);
 		const registry = new CapturingRegistry();
 		const settings = new CapturingSettings();
 		const result = await registerActiveApplianceRoute(
@@ -239,7 +242,11 @@ describe("active appliance model route", () => {
 			{ fetch: statusFetch(new Map([[8000, profile]])) },
 			[profile],
 		);
-		expect(result).toMatchObject({ profile: "rtx5090-linux", placement: "foreground", reason: "foreground_preference" });
+		expect(result).toMatchObject({
+			profile: "rtx5090-linux",
+			placement: "foreground",
+			reason: "foreground_preference",
+		});
 		expect(registry.provider).toBe("ninfer-appliance");
 		expect(registry.config?.baseUrl).toBe("http://127.0.0.1:8000/v1");
 		expect(registry.config?.api).toBe("openai-responses");
@@ -261,7 +268,12 @@ describe("active appliance model route", () => {
 		using temp = TempDir.createSync("@omp-appliance-fleet-");
 		const profiles = [publishedProfile("rtx5090-linux"), publishedProfile("rtx4090-windows")] as const;
 		await writeFleet(temp, profiles);
-		const fetchMock = statusFetch(new Map([[8000, profiles[0]], [8001, profiles[1]]]));
+		const fetchMock = statusFetch(
+			new Map([
+				[8000, profiles[0]],
+				[8001, profiles[1]],
+			]),
+		);
 		const foreground = await registerActiveApplianceRoute(
 			new CapturingRegistry(),
 			new CapturingSettings(),
@@ -301,7 +313,10 @@ describe("active appliance model route", () => {
 		using temp = TempDir.createSync("@omp-appliance-affinity-");
 		const profiles = [publishedProfile("rtx5090-linux"), publishedProfile("rtx4090-windows")] as const;
 		await writeFleet(temp, profiles);
-		const profilesByPort = new Map([[8000, profiles[0]], [8001, profiles[1]]]);
+		const profilesByPort = new Map([
+			[8000, profiles[0]],
+			[8001, profiles[1]],
+		]);
 		const unavailable = new Set<number>();
 		const fetchMock = statusFetch(profilesByPort, unavailable);
 		const initial = await registerActiveApplianceRoute(
@@ -377,7 +392,10 @@ describe("active appliance model route", () => {
 		const profile = publishedProfile();
 		const store = new FileApplianceStore(temp.path());
 		const secretRef = await store.createSecret("install-1");
-		await store.writeState({ schemaVersion: 1, revision: 1, active: installation(profile, secretRef, 8000, "install-1") }, 0);
+		await store.writeState(
+			{ schemaVersion: 1, revision: 1, active: installation(profile, secretRef, 8000, "install-1") },
+			0,
+		);
 		let error: unknown;
 		try {
 			await registerActiveApplianceRoute(new CapturingRegistry(), new CapturingSettings(), temp.path());
@@ -397,7 +415,9 @@ describe("active appliance model route", () => {
 		await store.writeState({ schemaVersion: 1, revision: 1, active }, 0);
 		let error: unknown;
 		try {
-			await registerActiveApplianceRoute(new CapturingRegistry(), new CapturingSettings(), temp.path(), {}, [profile]);
+			await registerActiveApplianceRoute(new CapturingRegistry(), new CapturingSettings(), temp.path(), {}, [
+				profile,
+			]);
 		} catch (caught) {
 			error = caught;
 		}
@@ -419,7 +439,9 @@ describe("active appliance model route", () => {
 		);
 		let error: unknown;
 		try {
-			await registerActiveApplianceRoute(new CapturingRegistry(), new CapturingSettings(), temp.path(), {}, [profile]);
+			await registerActiveApplianceRoute(new CapturingRegistry(), new CapturingSettings(), temp.path(), {}, [
+				profile,
+			]);
 		} catch (caught) {
 			error = caught;
 		}
@@ -430,7 +452,10 @@ describe("active appliance model route", () => {
 		using temp = TempDir.createSync("@omp-appliance-route-");
 		const applianceDir = path.join(temp.path(), "appliance");
 		await fs.mkdir(applianceDir, { recursive: true });
-		await fs.writeFile(path.join(applianceDir, "state.json"), `${JSON.stringify({ schemaVersion: 2, revision: 1 })}\n`);
+		await fs.writeFile(
+			path.join(applianceDir, "state.json"),
+			`${JSON.stringify({ schemaVersion: 2, revision: 1 })}\n`,
+		);
 		let error: unknown;
 		try {
 			await registerActiveApplianceRoute(new CapturingRegistry(), new CapturingSettings(), temp.path());
@@ -456,12 +481,31 @@ describe("active appliance model route", () => {
 		);
 
 		await expect(
-			registerActiveApplianceRoute(
-				new CapturingRegistry(),
-				new CapturingSettings(),
-				temp.path(),
-				{ allowUnavailable: true, requestedAlias: "local-max" },
-			),
+			registerActiveApplianceRoute(new CapturingRegistry(), new CapturingSettings(), temp.path(), {
+				allowUnavailable: true,
+				requestedAlias: "local-max",
+			}),
 		).rejects.toThrow("Unsupported appliance state schema");
+	});
+
+	it("finds only valid durable rollback receipts", async () => {
+		using temp = TempDir.createSync("@omp-appliance-receipts-");
+		const store = new FileApplianceStore(temp.path());
+		const receiptsDir = path.join(temp.path(), "appliance", "receipts");
+		await fs.mkdir(receiptsDir, { recursive: true });
+		await fs.writeFile(path.join(receiptsDir, "rollback-corrupt.json"), "{");
+
+		expect(await store.hasSuccessfulRollbackReceipt()).toBe(false);
+
+		await store.writeReceipt({
+			schemaVersion: 1,
+			receiptId: "rollback-ok",
+			action: "rollback",
+			status: "rolled-back",
+			timestamp: "2026-08-26T00:00:00.000Z",
+			details: {},
+		});
+
+		expect(await store.hasSuccessfulRollbackReceipt()).toBe(true);
 	});
 });

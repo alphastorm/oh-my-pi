@@ -195,6 +195,36 @@ export class FileApplianceStore implements ApplianceStore {
 		return file;
 	}
 
+	async hasSuccessfulRollbackReceipt(): Promise<boolean> {
+		const directory = path.join(this.root, "receipts");
+		let names: string[];
+		try {
+			names = await fs.readdir(directory);
+		} catch (error) {
+			if (errorCode(error) === "ENOENT") return false;
+			throw error;
+		}
+		for (const name of names) {
+			if (!name.startsWith("rollback-") || !name.endsWith(".json")) continue;
+			try {
+				const receipt: unknown = JSON.parse(await fs.readFile(path.join(directory, name), "utf8"));
+				if (
+					isRecord(receipt) &&
+					receipt.schemaVersion === 1 &&
+					receipt.action === "rollback" &&
+					receipt.status === "rolled-back" &&
+					typeof receipt.receiptId === "string" &&
+					name === `rollback-${receipt.receiptId}.json`
+				) {
+					return true;
+				}
+			} catch {
+				// A corrupt receipt is not evidence of a successful rollback.
+			}
+		}
+		return false;
+	}
+
 	async createSecret(installationId: string): Promise<string> {
 		assertSafeIdentifier(installationId, "installation identifier");
 		const relative = path.join("secrets", `${installationId}.key`);

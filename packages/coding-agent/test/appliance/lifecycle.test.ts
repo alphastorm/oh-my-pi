@@ -74,6 +74,7 @@ class MemoryStore implements ApplianceStore {
 	receiptWrites = 0;
 	secretWrites = 0;
 	lockCalls = 0;
+	failNextStateWrite = false;
 	events: string[] = [];
 
 	async readState(): Promise<ApplianceState> {
@@ -81,6 +82,10 @@ class MemoryStore implements ApplianceStore {
 	}
 
 	async writeState(next: ApplianceState, expectedRevision: number): Promise<void> {
+		if (this.failNextStateWrite) {
+			this.failNextStateWrite = false;
+			throw new Error("state-write-failed");
+		}
 		if (this.state.revision !== expectedRevision) throw new Error("unexpected-state-revision");
 		if (next.revision !== expectedRevision + 1) throw new Error("state-revision-not-advanced");
 		this.stateWrites += 1;
@@ -92,6 +97,10 @@ class MemoryStore implements ApplianceStore {
 		this.receiptWrites += 1;
 		this.receipts.push(structuredClone(receipt));
 		return `receipt-${receipt.receiptId}`;
+	}
+
+	async hasSuccessfulRollbackReceipt(): Promise<boolean> {
+		return this.receipts.some(receipt => receipt.action === "rollback" && receipt.status === "rolled-back");
 	}
 
 	async createSecret(installationId: string): Promise<string> {
@@ -420,6 +429,7 @@ describe("appliance lifecycle", () => {
 		expect(JSON.stringify(receipt)).not.toContain("super-secret-checkpoint");
 		expect(JSON.stringify(receipt)).not.toContain("baseUrl");
 		expect(store.receiptWrites).toBe(1);
+		expect(store.lockCalls).toBe(1);
 	});
 
 	it("requires an explicit profile when multiple appliances expose durable checkpoints", async () => {
@@ -457,9 +467,34 @@ describe("appliance lifecycle", () => {
 		const selected = await lifecycle.checkpoint("status", sessionSha256, "rtx4090-windows");
 
 		expect(selected.status).toBe("ok");
-		expect(platform.checkpointCalls).toEqual([
-			{ installationId: "fleet", operation: "status", sessionSha256 },
-		]);
+		expect(platform.checkpointCalls).toEqual([{ installationId: "fleet", operation: "status", sessionSha256 }]);
+		expect(store.lockCalls).toBe(2);
+	});
+
+	it("blocks an explicit checkpoint profile when corrupt state contains duplicate profiles", async () => {
+		const checkpointBase = installableProfile();
+		const profile: ApplianceProfile = {
+			...checkpointBase,
+			capabilities: [...checkpointBase.capabilities, "durable-checkpoint"],
+		};
+		const { lifecycle, store, platform } = harness(profile);
+		store.state = {
+			...emptyState(),
+			revision: 1,
+			active: installation("active", profile, "secret-active", 8000),
+			fleet: [installation("duplicate", profile, "secret-duplicate", 8001)],
+		};
+
+		const receipt = await lifecycle.checkpoint("status", "6".repeat(64), profile.profile);
+
+		expect(receipt).toMatchObject({
+			status: "blocked",
+			details: {
+				blocker: "Multiple rtx5090-linux installations expose durable checkpoints; repair appliance state",
+			},
+		});
+		expect(platform.checkpointCalls).toEqual([]);
+		expect(store.lockCalls).toBe(1);
 	});
 
 	it("installs once, switches the route atomically, and remains idempotent", async () => {
@@ -479,6 +514,29 @@ describe("appliance lifecycle", () => {
 		expect(second.details).toMatchObject({ idempotent: true, routeChanged: false });
 		expect(store.state.revision).toBe(1);
 		expect(platform.candidateCount).toBe(1);
+	});
+
+	it("retains an upgraded incumbent as a routable fleet member", async () => {
+		const target = installableProfile();
+		const { lifecycle, store } = harness(target);
+		const incumbent = installation("incumbent", target, "secret-incumbent", 9000);
+		incumbent.release = "previous-release";
+		incumbent.route.release = "previous-release";
+		store.state = { ...emptyState(), revision: 3, active: incumbent };
+		store.secrets.set("secret-incumbent", "incumbent-secret");
+
+		const receipt = await lifecycle.install("qwen3.8", "auto");
+
+		expect(receipt.status).toBe("ok");
+		expect(store.state.active?.release).toBe(target.release);
+		expect(store.state.fleet?.map(candidate => candidate.installationId)).toEqual(["incumbent"]);
+		expect(store.state.rollbackTarget?.installationId).toBe("incumbent");
+
+		const rollback = await lifecycle.rollback();
+
+		expect(rollback.status).toBe("rolled-back");
+		expect(store.state.active?.installationId).toBe("incumbent");
+		expect(store.state.fleet).toEqual([]);
 	});
 
 	it("fails closed on interrupted runtime or model acquisition", async () => {
@@ -640,6 +698,33 @@ describe("appliance lifecycle", () => {
 			"candidate:stop",
 		]);
 		expect(platform.stopped).toEqual([candidate.candidateHandle]);
+	});
+
+	it("reconciles a durable rollback receipt when the optional state pointer write fails", async () => {
+		const profile = installableProfile();
+		const incumbentProfile: ApplianceProfile = {
+			...profile,
+			profile: "rtx4090-windows",
+			aliases: ["local-fast", "local-batch", "qwen38-4090"],
+		};
+		const { lifecycle, store, platform } = harness(profile, [profile, incumbentProfile]);
+		const candidate = installation("candidate", profile, "secret-candidate", 8000);
+		const incumbent = installation("incumbent", incumbentProfile, "secret-incumbent", 9000);
+		store.secrets.set("secret-candidate", "candidate-secret");
+		store.secrets.set("secret-incumbent", "incumbent-secret");
+		store.state = { schemaVersion: 1, revision: 7, active: candidate, rollbackTarget: incumbent };
+		platform.onRoutedRequest = routed => {
+			if (routed.installationId === "incumbent") store.failNextStateWrite = true;
+		};
+
+		const receipt = await lifecycle.rollback();
+
+		expect(receipt.status).toBe("rolled-back");
+		expect(store.state.active?.installationId).toBe("incumbent");
+		expect(store.state.lastRollbackReceiptId).toBeUndefined();
+		const support = await lifecycle.supportBundle();
+		expect(support.details.verdicts).toMatchObject({ rollback: "passed" });
+		expect(support.details.blockers).not.toContain("No successful rollback receipt");
 	});
 
 	it("restores and proves the candidate when explicit rollback routing fails", async () => {

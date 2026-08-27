@@ -1352,17 +1352,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		);
 	if (!options.modelRegistry) {
 		const requestedPattern = Array.isArray(options.modelPattern) ? options.modelPattern[0] : options.modelPattern;
-		const requestedId = options.model?.id ?? requestedPattern?.trim().split("/").at(-1)?.split(":")[0];
+		const explicitSelector = options.model ? `${options.model.provider}/${options.model.id}` : requestedPattern;
+		const effectiveSelector = options.model
+			? explicitSelector
+			: resolveConfiguredModelPatterns(explicitSelector ?? settings.getModelRole("default"), settings)[0];
+		const requestedId = options.model?.id ?? effectiveSelector?.trim().split("/").at(-1)?.split(":")[0];
 		const requestedAlias =
 			requestedId && /^(?:local-(?:max|fast|batch)|qwen38-(?:5090|4090))$/.test(requestedId)
 				? requestedId
 				: undefined;
-		const explicitSelector = options.model
-			? `${options.model.provider}/${options.model.id}`
-			: requestedPattern;
-		const applianceRouteRequired = isApplianceModelSelector(
-			explicitSelector ?? settings.getModelRole("default"),
-		);
+		const applianceRouteRequired = isApplianceModelSelector(effectiveSelector);
 		const backgroundPlacement =
 			requestedAlias === "local-batch" ||
 			(options.taskDepth ?? 0) > 0 ||
@@ -1373,8 +1372,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			placement: backgroundPlacement ? "background" : "foreground",
 			requestedAlias,
 			vision: requestedAlias ? options.model?.input.includes("image") : false,
-			coldLocalFallback:
-				options.applianceColdLocalFallback ?? settings.get("appliance.coldLocalFallback"),
+			coldLocalFallback: options.applianceColdLocalFallback ?? settings.get("appliance.coldLocalFallback"),
 			foregroundReservation:
 				options.applianceForegroundReservation ?? settings.get("appliance.foregroundReservation"),
 			allowUnavailable: !applianceRouteRequired,

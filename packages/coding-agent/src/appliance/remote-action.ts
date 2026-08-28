@@ -2,16 +2,11 @@ import type { NInferCheckpointOperation } from "@oh-my-pi/pi-ai/providers/ninfer
 import { CliUsageError } from "@oh-my-pi/pi-utils/cli";
 import type { CompatibilityAuthority } from "./compatibility-authority";
 import {
-	SshApplianceExecutor,
 	type RemoteApplianceExecuteOptions,
+	SshApplianceExecutor,
 	type SshApplianceExecutorOptions,
 } from "./remote-executor";
-import type {
-	ApplianceAction,
-	ApplianceGpuSelector,
-	ApplianceProfile,
-	ApplianceReceipt,
-} from "./types";
+import type { ApplianceAction, ApplianceGpuSelector, ApplianceProfile, ApplianceReceipt } from "./types";
 
 type RemoteReceiptExecutor = Pick<SshApplianceExecutor, "execute">;
 export type RemoteReceiptExecutorFactory = (options: SshApplianceExecutorOptions) => RemoteReceiptExecutor;
@@ -53,10 +48,12 @@ export async function executeRemoteApplianceAction(
 		throw new CliUsageError("Remote lifecycle delegation requires the darwin-remote-ssh compatibility profile");
 	}
 	if (action !== "doctor" && action !== "status" && (!flags.authority || !flags.selectedProfile)) {
-		throw new CliUsageError("Remote lifecycle actions require the darwin-remote-ssh profile and exact compatibility authority");
+		throw new CliUsageError(
+			"Remote lifecycle actions require the darwin-remote-ssh profile and exact compatibility authority",
+		);
 	}
 	if (flags.selectedProfile && !flags.selectedProfile.lifecycleCommands?.includes(action)) {
-		throw new CliUsageError("Compatibility profile does not declare appliance " + action);
+		throw new CliUsageError(`Compatibility profile does not declare appliance ${action}`);
 	}
 	const options: RemoteApplianceExecuteOptions = {
 		...(flags.model === "qwen3.8" ? { model: "qwen3.8" as const } : {}),

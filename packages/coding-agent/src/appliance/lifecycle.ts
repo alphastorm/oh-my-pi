@@ -249,14 +249,19 @@ export class ApplianceLifecycle {
 			profile: resolution.profile,
 			supported: resolution.supported,
 			installable: Boolean(
-				resolution.profile && resolution.supported && isProfileInstallable(resolution.profile) && (!occupied || ownedIncumbentPort),
+				resolution.profile &&
+					resolution.supported &&
+					isProfileInstallable(resolution.profile) &&
+					(!occupied || ownedIncumbentPort),
 			),
 			blockers,
 			port,
 			priorProfile: state.active?.profile,
 			rollbackAvailable: Boolean(state.active),
 			expectedVramGiB: resolution.profile?.minVramGiB,
-			expectedDiskGiB: resolution.profile?.minimumDiskGiB ?? (expectedBytes === undefined ? undefined : Math.round((expectedBytes / 1024 ** 3) * 10) / 10),
+			expectedDiskGiB:
+				resolution.profile?.minimumDiskGiB ??
+				(expectedBytes === undefined ? undefined : Math.round((expectedBytes / 1024 ** 3) * 10) / 10),
 			commands: resolution.profile ? planCommands(resolution.profile, port) : [],
 		};
 		return {
@@ -271,11 +276,19 @@ export class ApplianceLifecycle {
 				priorProfile: plan.priorProfile,
 				rollbackAvailable: plan.rollbackAvailable,
 				expectedOutage: Boolean(state.active),
-				rollbackAction: state.active ? `restore installation ${state.active.installationId}` : "remove owned candidate",
+				rollbackAction: state.active
+					? `restore installation ${state.active.installationId}`
+					: "remove owned candidate",
 				expectedVramGiB: plan.expectedVramGiB,
 				expectedDiskGiB: plan.expectedDiskGiB,
 				commands: plan.commands,
-				pending: state.pending ? { action: state.pending.action, stage: state.pending.stage, failureReceiptId: state.pending.failureReceiptId } : undefined,
+				pending: state.pending
+					? {
+							action: state.pending.action,
+							stage: state.pending.stage,
+							failureReceiptId: state.pending.failureReceiptId,
+						}
+					: undefined,
 			}),
 		};
 	}
@@ -311,10 +324,13 @@ export class ApplianceLifecycle {
 			if (!plan.supported || !isProfileInstallable(profile) || plan.blockers.length > 0) {
 				return this.#persistBlockedInstall(plan.blockers);
 			}
-			if (!profile.assets || (!profile.launch?.secretEnvironmentVariable.trim() && !(profile.container && profile.lifecycle))) {
+			if (
+				!profile.assets ||
+				(!profile.launch?.secretEnvironmentVariable.trim() && !(profile.container && profile.lifecycle))
+			) {
 				return this.#persistBlockedInstall(["Released profile lacks authenticated runtime launch metadata"]);
 			}
-			if (await this.#platform.isPortOccupied(plan.port) && state.active?.route.port !== plan.port) {
+			if ((await this.#platform.isPortOccupied(plan.port)) && state.active?.route.port !== plan.port) {
 				return this.#persistBlockedInstall([`Port ${plan.port} became occupied before candidate creation`]);
 			}
 
@@ -661,7 +677,9 @@ export class ApplianceLifecycle {
 			const candidate = state.active;
 			const incumbent = state.rollbackTarget;
 			if (state.pending?.action === "install") {
-				const receipt = this.#receipt("rollback", "blocked", { blocker: "Interrupted install must be resolved before rollback" });
+				const receipt = this.#receipt("rollback", "blocked", {
+					blocker: "Interrupted install must be resolved before rollback",
+				});
 				await this.#store.writeReceipt(receipt);
 				return receipt;
 			}

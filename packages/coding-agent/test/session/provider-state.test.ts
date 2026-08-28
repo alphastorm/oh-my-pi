@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { AssistantMessage, ProviderStatePersistenceSnapshot } from "@oh-my-pi/pi-ai/types";
 import {
 	finalizeProviderStateEnvelope,
-	loadProviderStateSnapshot,
 	loadProviderStateAffinity,
+	loadProviderStateSnapshot,
 	PROVIDER_STATE_CUSTOM_TYPE,
 	type ProviderStateEnvelopeV1,
 	prepareProviderStateEnvelope,
@@ -121,9 +121,9 @@ describe("provider state journal", () => {
 
 		const reopened = await SessionManager.open(sessionFile, tempDir.path());
 		expect(await load(reopened)).toEqual(expected);
-		expect(
-			loadProviderStateAffinity({ sessionManager: reopened, sessionId: reopened.getSessionId() }),
-		).toEqual(expected.ninferAffinity);
+		expect(loadProviderStateAffinity({ sessionManager: reopened, sessionId: reopened.getSessionId() })).toEqual(
+			expected.ninferAffinity,
+		);
 		await reopened.close();
 	});
 

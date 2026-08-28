@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { BoundedApplianceExecutor } from "@oh-my-pi/pi-coding-agent/appliance/bounded-executor";
 import {
 	detectNativeWindowsDocker,
 	inspectNativeWindowsDocker,
 	validateWindowsLocalPath,
 	windowsSystem32Path,
 } from "@oh-my-pi/pi-coding-agent/appliance/windows-docker-detection";
-import { BoundedApplianceExecutor } from "@oh-my-pi/pi-coding-agent/appliance/bounded-executor";
 
 const READY = {
 	platform: "win32",
@@ -59,13 +59,23 @@ describe("native Windows Docker detection", () => {
 		const executor = new BoundedApplianceExecutor({
 			runner: async command => {
 				if (command[0] === "C:\\Windows\\System32\\where.exe") {
-					return { code: 0, stdout: "docker.exe\r\n\\\\server\\docker.exe\r\n" + localDocker + "\r\n", stderr: "" };
+					return {
+						code: 0,
+						stdout: `docker.exe\r\n\\\\server\\docker.exe\r\n${localDocker}\r\n`,
+						stderr: "",
+					};
 				}
 				if (command[0] === localDocker && command[1] === "context") {
 					return { code: 0, stdout: "desktop-linux\n", stderr: "" };
 				}
 				if (command[0] === localDocker && command[1] === "version") {
-					return { code: 0, stdout: JSON.stringify({ Server: { Os: "linux", Arch: "amd64", Platform: { Name: "Docker Desktop" } } }), stderr: "" };
+					return {
+						code: 0,
+						stdout: JSON.stringify({
+							Server: { Os: "linux", Arch: "amd64", Platform: { Name: "Docker Desktop" } },
+						}),
+						stderr: "",
+					};
 				}
 				return { code: 1, stdout: "", stderr: "not found" };
 			},

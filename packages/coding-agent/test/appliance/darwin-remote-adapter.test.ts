@@ -3,16 +3,39 @@ import { buildSshForwardCommand } from "@oh-my-pi/pi-coding-agent/appliance/darw
 
 describe("darwin remote SSH adapter", () => {
 	test("builds one authenticated loopback forward without shell parsing", () => {
-		const command = buildSshForwardCommand({ host: "gpu-host", localPort: 18089, remotePort: 18089, platform: "darwin" });
+		const command = buildSshForwardCommand({
+			host: "gpu-host",
+			localPort: 18089,
+			remotePort: 18089,
+			platform: "darwin",
+		});
 		expect(command).toEqual([
-			"/usr/bin/ssh", "-N", "-T", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
-			"-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ConnectTimeout=10", "-L",
-			"127.0.0.1:18089:127.0.0.1:18089", "gpu-host",
+			"/usr/bin/ssh",
+			"-N",
+			"-T",
+			"-o",
+			"BatchMode=yes",
+			"-o",
+			"ExitOnForwardFailure=yes",
+			"-o",
+			"ForwardAgent=no",
+			"-o",
+			"ForwardX11=no",
+			"-o",
+			"ConnectTimeout=10",
+			"-L",
+			"127.0.0.1:18089:127.0.0.1:18089",
+			"gpu-host",
 		]);
 	});
 	test("preserves its command-line loopback forward in OpenSSH effective configuration", async () => {
 		if (process.platform === "win32") return;
-		const command = buildSshForwardCommand({ host: "example.invalid", localPort: 18089, remotePort: 18090, platform: "darwin" });
+		const command = buildSshForwardCommand({
+			host: "example.invalid",
+			localPort: 18089,
+			remotePort: 18090,
+			platform: "darwin",
+		});
 		const child = Bun.spawn([command[0]!, "-G", "-F", "/dev/null", ...command.slice(1)], {
 			stdout: "pipe",
 			stderr: "pipe",
@@ -32,8 +55,14 @@ describe("darwin remote SSH adapter", () => {
 		expect(localForward).toContain(":18090");
 	});
 	test("fails before SSH for unsafe destinations and non-macOS clients", () => {
-		expect(() => buildSshForwardCommand({ host: "-oProxyCommand=bad", localPort: 1, remotePort: 1, platform: "darwin" })).toThrow("hostname");
-		expect(() => buildSshForwardCommand({ host: "gpu-host\n", localPort: 1, remotePort: 1, platform: "darwin" })).toThrow();
-		expect(() => buildSshForwardCommand({ host: "gpu-host", localPort: 1, remotePort: 1, platform: "linux" })).toThrow("macOS");
+		expect(() =>
+			buildSshForwardCommand({ host: "-oProxyCommand=bad", localPort: 1, remotePort: 1, platform: "darwin" }),
+		).toThrow("hostname");
+		expect(() =>
+			buildSshForwardCommand({ host: "gpu-host\n", localPort: 1, remotePort: 1, platform: "darwin" }),
+		).toThrow();
+		expect(() =>
+			buildSshForwardCommand({ host: "gpu-host", localPort: 1, remotePort: 1, platform: "linux" }),
+		).toThrow("macOS");
 	});
 });

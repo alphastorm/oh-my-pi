@@ -58,9 +58,9 @@ import {
 	createNInferRequestIdentity,
 	fetchNInferEndpointIdentity,
 	NINFER_REQUEST_SHAPE_VERSION,
-	stripUnsupportedNInferRequestFields,
 	type NInferEndpointIdentity,
 	type NInferRequestIdentity,
+	stripUnsupportedNInferRequestFields,
 } from "./ninfer";
 import {
 	applyOpenAIReasoningEffortFallback,
@@ -837,9 +837,7 @@ const streamOpenAIResponsesOnce = (
 							);
 							const fallbackParams = fallbackBuilt.params;
 							if (ninferRequestIdentity) {
-								stripUnsupportedNInferRequestFields(
-									fallbackParams as unknown as Record<string, unknown>,
-								);
+								stripUnsupportedNInferRequestFields(fallbackParams as unknown as Record<string, unknown>);
 							}
 							if (chainState && !chainState.disabled) fallbackParams.store = true;
 							let fallbackChained: OpenAIResponsesChainedParams =
@@ -898,9 +896,7 @@ const streamOpenAIResponsesOnce = (
 						);
 						const currentParams = currentBuilt.params;
 						if (ninferRequestIdentity) {
-							stripUnsupportedNInferRequestFields(
-								currentParams as unknown as Record<string, unknown>,
-							);
+							stripUnsupportedNInferRequestFields(currentParams as unknown as Record<string, unknown>);
 						}
 						// Only ZDR forces `store: false` (the org never persists responses). A
 						// non-ZDR stale baseline is transient, so keep storing: the full-context

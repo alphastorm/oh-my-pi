@@ -9,10 +9,10 @@ import {
 	parseRemoteApplianceReceipt,
 	parseRemoteDelegationManifest,
 	REMOTE_APPLIANCE_BUILD_ID,
-	remoteActionMayPersist,
 	type RemoteApplianceCompatibility,
 	type RemoteApplianceInvocation,
 	type RemoteDelegationMetadata,
+	remoteActionMayPersist,
 } from "./remote-protocol";
 import type { ApplianceAction, ApplianceReceipt } from "./types";
 
@@ -42,8 +42,15 @@ const REMOTE_PRE_LOCAL_PROFILE_FAILURES = new Set([
 	"REMOTE_WSL_CONTEXT_MISMATCH",
 ]);
 const REMOTE_METADATA_KEYS = new Set([
-	"schemaVersion", "version", "buildIdentity", "compatibilitySha256", "transportProfile", "localProfile",
-	"cleanup", "effect", "failureCode",
+	"schemaVersion",
+	"version",
+	"buildIdentity",
+	"compatibilitySha256",
+	"transportProfile",
+	"localProfile",
+	"cleanup",
+	"effect",
+	"failureCode",
 ]);
 const SHA256 = /^[a-f0-9]{64}$/u;
 
@@ -55,9 +62,11 @@ export function validateRemoteHost(value: string): string {
 }
 
 export function validateWslDistribution(value: string | undefined): string | undefined {
-	if (value !== undefined && /[\u0000-\u001f\u007f]/u.test(value)) throw new Error("Remote WSL distribution contains control characters");
+	if (value !== undefined && /[\u0000-\u001f\u007f]/u.test(value))
+		throw new Error("Remote WSL distribution contains control characters");
 	const distribution = value?.trim();
-	if (distribution && !WSL_DISTRIBUTION.test(distribution)) throw new Error("Remote WSL distribution has invalid characters");
+	if (distribution && !WSL_DISTRIBUTION.test(distribution))
+		throw new Error("Remote WSL distribution has invalid characters");
 	return distribution || undefined;
 }
 
@@ -84,7 +93,7 @@ export class RemoteApplianceError extends Error {
 		message: string,
 		readonly effect: "none" | "uncertain",
 	) {
-		super(code + ": " + message);
+		super(`${code}: ${message}`);
 		this.name = "RemoteApplianceError";
 	}
 }
@@ -108,15 +117,19 @@ function remoteMetadata(receipt: ApplianceReceipt): RemoteDelegationMetadata {
 	}
 	const metadata = value as Record<string, unknown>;
 	if (
-		Object.keys(metadata).some(key => !REMOTE_METADATA_KEYS.has(key)) || metadata.schemaVersion !== 1 ||
-		typeof metadata.version !== "string" || typeof metadata.buildIdentity !== "string" ||
+		Object.keys(metadata).some(key => !REMOTE_METADATA_KEYS.has(key)) ||
+		metadata.schemaVersion !== 1 ||
+		typeof metadata.version !== "string" ||
+		typeof metadata.buildIdentity !== "string" ||
 		(metadata.compatibilitySha256 !== null &&
 			(typeof metadata.compatibilitySha256 !== "string" || !SHA256.test(metadata.compatibilitySha256))) ||
 		(metadata.transportProfile !== null && metadata.transportProfile !== "darwin-remote-ssh") ||
 		(metadata.localProfile !== null &&
 			(typeof metadata.localProfile !== "string" || !REMOTE_LOCAL_PROFILES.has(metadata.localProfile))) ||
-		typeof metadata.cleanup !== "string" || !REMOTE_CLEANUP_STATES.has(metadata.cleanup) ||
-		typeof metadata.effect !== "string" || !REMOTE_EFFECT_STATES.has(metadata.effect) ||
+		typeof metadata.cleanup !== "string" ||
+		!REMOTE_CLEANUP_STATES.has(metadata.cleanup) ||
+		typeof metadata.effect !== "string" ||
+		!REMOTE_EFFECT_STATES.has(metadata.effect) ||
 		(metadata.failureCode !== undefined &&
 			(typeof metadata.failureCode !== "string" || !REMOTE_FAILURE_CODES.has(metadata.failureCode)))
 	) {
@@ -197,7 +210,9 @@ export class SshApplianceExecutor {
 				}
 				throw new RemoteApplianceError(
 					phase === "identity" ? "REMOTE_CLIENT_TIMEOUT" : "REMOTE_ACTION_TIMEOUT",
-					phase === "identity" ? "the exact remote OMP client did not answer in time" : "the remote non-mutating action timed out",
+					phase === "identity"
+						? "the exact remote OMP client did not answer in time"
+						: "the remote non-mutating action timed out",
 					"none",
 				);
 			}
@@ -235,7 +250,7 @@ export class SshApplianceExecutor {
 				"none",
 			);
 		}
-		let manifest;
+		let manifest: ReturnType<typeof parseRemoteDelegationManifest>;
 		try {
 			manifest = parseRemoteDelegationManifest(identity.stdout);
 		} catch {
@@ -248,7 +263,7 @@ export class SshApplianceExecutor {
 		if (manifest.version !== this.#expectedVersion) {
 			throw new RemoteApplianceError(
 				"REMOTE_VERSION_MISMATCH",
-				"remote OMP version " + manifest.version + " does not equal required version " + this.#expectedVersion,
+				`remote OMP version ${manifest.version} does not equal required version ${this.#expectedVersion}`,
 				"none",
 			);
 		}
@@ -293,7 +308,8 @@ export class SshApplianceExecutor {
 		try {
 			delegation = remoteMetadata(receipt);
 			if (
-				delegation.schemaVersion !== 1 || delegation.version !== this.#expectedVersion ||
+				delegation.schemaVersion !== 1 ||
+				delegation.version !== this.#expectedVersion ||
 				delegation.buildIdentity !== REMOTE_APPLIANCE_BUILD_ID ||
 				delegation.compatibilitySha256 !== (options.compatibility?.sha256 ?? null) ||
 				delegation.transportProfile !== (options.compatibility?.transportProfile ?? null)
@@ -301,8 +317,11 @@ export class SshApplianceExecutor {
 				throw new Error("mismatch");
 			}
 			const preLocalProfileFailure =
-				receipt.status === "failed" && delegation.localProfile === null && delegation.effect === "none" &&
-				delegation.failureCode !== undefined && REMOTE_PRE_LOCAL_PROFILE_FAILURES.has(delegation.failureCode);
+				receipt.status === "failed" &&
+				delegation.localProfile === null &&
+				delegation.effect === "none" &&
+				delegation.failureCode !== undefined &&
+				REMOTE_PRE_LOCAL_PROFILE_FAILURES.has(delegation.failureCode);
 			if (
 				(options.compatibility
 					? delegation.localProfile === null && !preLocalProfileFailure
@@ -323,7 +342,12 @@ export class SshApplianceExecutor {
 				isEffectful ? "uncertain" : "none",
 			);
 		}
-		if (result.code !== 0 && receipt.status !== "failed" && receipt.status !== "blocked" && receipt.status !== "rolled-back") {
+		if (
+			result.code !== 0 &&
+			receipt.status !== "failed" &&
+			receipt.status !== "blocked" &&
+			receipt.status !== "rolled-back"
+		) {
 			throw new RemoteApplianceError(
 				"REMOTE_EFFECT_UNCERTAIN",
 				"the remote command exit and receipt disagree; the effect is uncertain and the action must not be retried blindly",

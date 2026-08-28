@@ -1326,15 +1326,13 @@ describe("executeBash :async: background retention", () => {
 			timedOut: false,
 		});
 		const backgroundCount = Promise.withResolvers<number>();
-		vi.spyOn(piNatives.Shell.prototype, "liveBackgroundJobCount").mockReturnValue(
-			backgroundCount.promise,
-		);
+		vi.spyOn(piNatives.Shell.prototype, "liveBackgroundJobCount").mockReturnValue(backgroundCount.promise);
 
 		const raced = await Promise.race([
 			executeBash("true", {
 				sessionKey: "bookkeeping-probe:async:job1",
 				cwd: tmp,
-			}).then((result) => ({ kind: "result" as const, result })),
+			}).then(result => ({ kind: "result" as const, result })),
 			Bun.sleep(500).then(() => ({ kind: "timeout" as const })),
 		]);
 

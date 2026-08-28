@@ -26,10 +26,10 @@ export interface WindowsDockerDetection {
 export function validateWindowsLocalPath(value: string, label: string): string {
 	const trimmed = value.trim();
 	if (!trimmed || trimmed.startsWith("-") || /[\u0000-\u001f\u007f]/u.test(trimmed)) {
-		throw new Error(label + " is blank, option-shaped, or contains control characters");
+		throw new Error(`${label} is blank, option-shaped, or contains control characters`);
 	}
 	if (/^\\\\/u.test(trimmed) || !/^[A-Za-z]:\\/u.test(trimmed)) {
-		throw new Error(label + " must be a local absolute Windows drive path");
+		throw new Error(`${label} must be a local absolute Windows drive path`);
 	}
 	return path.win32.normalize(trimmed);
 }
@@ -39,8 +39,8 @@ export function windowsSystem32Path(
 	systemRoot: string | undefined = process.env.SystemRoot,
 ): string {
 	return validateWindowsLocalPath(
-		path.win32.join(systemRoot ?? "C:\Windows", "System32", executable),
-		executable + " path",
+		path.win32.join(systemRoot ?? "C:Windows", "System32", executable),
+		`${executable} path`,
 	);
 }
 
@@ -79,8 +79,10 @@ function parseDockerVersion(value: string): {
 } {
 	try {
 		const parsed = JSON.parse(value) as Record<string, unknown>;
-		const server = parsed.Server && typeof parsed.Server === "object" ? (parsed.Server as Record<string, unknown>) : {};
-		const platform = server.Platform && typeof server.Platform === "object" ? (server.Platform as Record<string, unknown>) : {};
+		const server =
+			parsed.Server && typeof parsed.Server === "object" ? (parsed.Server as Record<string, unknown>) : {};
+		const platform =
+			server.Platform && typeof server.Platform === "object" ? (server.Platform as Record<string, unknown>) : {};
 		return {
 			serverOs: typeof server.Os === "string" ? server.Os : undefined,
 			serverArchitecture: typeof server.Arch === "string" ? server.Arch : undefined,
@@ -91,7 +93,10 @@ function parseDockerVersion(value: string): {
 	}
 }
 
-async function commandOutput(executor: BoundedApplianceExecutor, command: readonly string[]): Promise<string | undefined> {
+async function commandOutput(
+	executor: BoundedApplianceExecutor,
+	command: readonly string[],
+): Promise<string | undefined> {
 	try {
 		const result = await executor.run(command);
 		return result.code === 0 ? result.stdout.trim() : undefined;
@@ -109,11 +114,16 @@ export async function inspectNativeWindowsDocker(
 		candidates.push(environment.OMP_DOCKER_EXE);
 	} else {
 		if (environment.ProgramFiles) {
-			candidates.push(path.win32.join(environment.ProgramFiles, "Docker", "Docker", "resources", "bin", "docker.exe"));
+			candidates.push(
+				path.win32.join(environment.ProgramFiles, "Docker", "Docker", "resources", "bin", "docker.exe"),
+			);
 		}
 		let located: string | undefined;
 		try {
-			located = await commandOutput(executor, [windowsSystem32Path("where.exe", environment.SystemRoot), "docker.exe"]);
+			located = await commandOutput(executor, [
+				windowsSystem32Path("where.exe", environment.SystemRoot),
+				"docker.exe",
+			]);
 		} catch {}
 		for (const candidate of located?.split(/\r?\n/u).filter(Boolean) ?? []) {
 			try {
@@ -127,8 +137,11 @@ export async function inspectNativeWindowsDocker(
 	let version: string | undefined;
 	for (const candidate of candidates) {
 		let normalized: string;
-		try { normalized = validateWindowsLocalPath(candidate, "docker.exe path"); }
-		catch { continue; }
+		try {
+			normalized = validateWindowsLocalPath(candidate, "docker.exe path");
+		} catch {
+			continue;
+		}
 		const [candidateContext, candidateVersion] = await Promise.all([
 			commandOutput(executor, [normalized, "context", "show"]),
 			commandOutput(executor, [normalized, "version", "--format", "{{json .}}"]),

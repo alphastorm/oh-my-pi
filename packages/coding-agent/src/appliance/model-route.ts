@@ -171,7 +171,8 @@ function selectFresh(
 		const leftIdentity = left.identity!;
 		const rightIdentity = right.identity!;
 		const leftSaturated = leftIdentity.status.scheduler.waiting >= leftIdentity.status.scheduler.maxPendingRequests;
-		const rightSaturated = rightIdentity.status.scheduler.waiting >= rightIdentity.status.scheduler.maxPendingRequests;
+		const rightSaturated =
+			rightIdentity.status.scheduler.waiting >= rightIdentity.status.scheduler.maxPendingRequests;
 		if (leftSaturated !== rightSaturated) return leftSaturated ? 1 : -1;
 		const leftPreferred = left.profile.profile === preferred;
 		const rightPreferred = right.profile.profile === preferred;
@@ -308,9 +309,7 @@ export async function registerActiveApplianceRoute(
 				reason = "warm_owner";
 			} else {
 				if (!options.coldLocalFallback) {
-					throw new Error(
-						"Warm NInfer session owner is unavailable or changed; cold local fallback is disabled",
-					);
+					throw new Error("Warm NInfer session owner is unavailable or changed; cold local fallback is disabled");
 				}
 				selected = selectFresh(observations, placement, options.foregroundReservation ?? true);
 				if (!selected) {

@@ -102,10 +102,13 @@ function hostBlockers(profile: ApplianceProfile, host: ApplianceHostFacts): stri
 	if (profile.profile === "rtx4090-windows" && host.os !== "win32") {
 		blockers.push(`rtx4090-windows requires Windows; detected ${host.os}`);
 	}
-	const compatibleGpu = profile.adapter === "darwin-remote-ssh" ? undefined : host.gpus.find(gpu => {
-		const model = gpu.model.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
-		return profile.profile === "rtx4090-windows" ? model.includes("4090") : model.includes("5090");
-	});
+	const compatibleGpu =
+		profile.adapter === "darwin-remote-ssh"
+			? undefined
+			: host.gpus.find(gpu => {
+					const model = gpu.model.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
+					return profile.profile === "rtx4090-windows" ? model.includes("4090") : model.includes("5090");
+				});
 	if (profile.adapter !== "darwin-remote-ssh" && !compatibleGpu) {
 		blockers.push(`No ${profile.profile === "rtx4090-windows" ? "RTX 4090" : "RTX 5090"} detected`);
 	} else if (compatibleGpu) {
@@ -127,7 +130,10 @@ function hostBlockers(profile: ApplianceProfile, host: ApplianceHostFacts): stri
 		blockers.push("Required Windows NInfer runtime prerequisites are unavailable");
 	}
 	if (!host.secretStorageAvailable) blockers.push("Secure appliance secret storage is unavailable");
-	if (profile.minimumDiskGiB !== undefined && (host.freeDiskGiB === undefined || host.freeDiskGiB < profile.minimumDiskGiB)) {
+	if (
+		profile.minimumDiskGiB !== undefined &&
+		(host.freeDiskGiB === undefined || host.freeDiskGiB < profile.minimumDiskGiB)
+	) {
 		blockers.push(`Host has ${host.freeDiskGiB ?? "unknown"} GiB free disk; ${profile.minimumDiskGiB} GiB required`);
 	}
 	return blockers;

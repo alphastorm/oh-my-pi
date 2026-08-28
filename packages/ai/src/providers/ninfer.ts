@@ -77,13 +77,7 @@ export class NInferStatusError extends Error {
 }
 
 export type NInferCheckpointOperation = "status" | "save" | "delete";
-export type NInferCheckpointState =
-	| "available"
-	| "missing"
-	| "incompatible"
-	| "corrupt"
-	| "disabled"
-	| "deleted";
+export type NInferCheckpointState = "available" | "missing" | "incompatible" | "corrupt" | "disabled" | "deleted";
 
 export interface NInferCheckpointStatus {
 	artifactType: "ninfer_session_checkpoint_status";

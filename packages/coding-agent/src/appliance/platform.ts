@@ -9,9 +9,9 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
 	fetchNInferStatus,
-	requestNInferCheckpoint,
 	type NInferCheckpointOperation,
 	type NInferCheckpointStatus,
+	requestNInferCheckpoint,
 } from "@oh-my-pi/pi-ai/providers/ninfer";
 import type {
 	ApplianceAsset,

@@ -247,7 +247,11 @@ function validatedProviderStateEnvelope(options: {
 	const envelope = parseEnvelope(located.entry.data);
 	if (!envelope || envelope.sessionIdentitySha256 !== sessionIdentityDigest(options.sessionId)) return undefined;
 	const committedIndex = branch.findIndex(entry => entry.id === envelope.lastCommittedTurnId);
-	if (committedIndex < 0 || committedIndex >= located.index || located.entry.parentId !== envelope.lastCommittedTurnId) {
+	if (
+		committedIndex < 0 ||
+		committedIndex >= located.index ||
+		located.entry.parentId !== envelope.lastCommittedTurnId
+	) {
 		return undefined;
 	}
 	const committedEntry = branch[committedIndex];
@@ -287,7 +291,11 @@ export async function loadProviderStateSnapshot(options: {
 }): Promise<ProviderStatePersistenceSnapshot | undefined> {
 	try {
 		const envelope = validatedProviderStateEnvelope(options);
-		if (!envelope || envelope.model !== options.model || envelope.requestShapeVersion !== options.requestShapeVersion) {
+		if (
+			!envelope ||
+			envelope.model !== options.model ||
+			envelope.requestShapeVersion !== options.requestShapeVersion
+		) {
 			return undefined;
 		}
 		const [requestBaseline, priorOutputItems] = await Promise.all([

@@ -128,7 +128,8 @@ function parseState(raw: string): ApplianceState {
 			stage,
 			profile: profile as ApplianceProfileId,
 			installationId: parsed.pending.installationId,
-			predecessor: parsed.pending.predecessor === undefined ? undefined : parseInstallation(parsed.pending.predecessor),
+			predecessor:
+				parsed.pending.predecessor === undefined ? undefined : parseInstallation(parsed.pending.predecessor),
 			failureReceiptId: optionalString(parsed.pending.failureReceiptId),
 		};
 	}

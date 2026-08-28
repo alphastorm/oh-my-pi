@@ -365,7 +365,6 @@ export interface ProviderStatePersistenceSnapshot {
 	ninferAffinity?: NInferSessionAffinity;
 }
 
-
 export interface ProviderStatePersistenceSelection {
 	provider: string;
 	model: string;

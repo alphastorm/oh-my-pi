@@ -359,9 +359,7 @@ function formatCohortIrcPeerRoster(roster: IrcPeerRosterData): string {
 		lines.push("Idle peers are not gone: messaging them wakes them.");
 	}
 	if (roster.parkedCount > 0) {
-		lines.push(
-			`${roster.parkedCount} parked peer(s) omitted. Query with \`hub\` op:"list" status:"parked".`,
-		);
+		lines.push(`${roster.parkedCount} parked peer(s) omitted. Query with \`hub\` op:"list" status:"parked".`);
 	}
 	return lines.join("\n");
 }
@@ -3568,10 +3566,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				initialPromptCacheCohort && ircEnabled
 					? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
 					: undefined;
-			const cohortTask =
-				cohortRoster
-					? `# Peers\nYou can reach other live agents via the hub tool. Your id is ${id}.\n${formatCohortIrcPeerRoster(cohortRoster)}\nUse hub messaging only for quick coordination; refresh the roster with hub list before relying on it.\n\n${task}`
-					: task;
+			const cohortTask = cohortRoster
+				? `# Peers\nYou can reach other live agents via the hub tool. Your id is ${id}.\n${formatCohortIrcPeerRoster(cohortRoster)}\nUse hub messaging only for quick coordination; refresh the roster with hub list before relying on it.\n\n${task}`
+				: task;
 			const outcome = await driveSessionToYield(session, monitor, cohortTask);
 			exitCode = outcome.exitCode;
 			error = outcome.error;

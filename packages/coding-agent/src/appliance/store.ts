@@ -20,7 +20,6 @@ const PROFILE_IDS = new Set<ApplianceProfileId>([
 
 const STATE_FILE = "state.json";
 const LOCK_FILE = "install.lock";
-const LOCK_STALE_MS = 24 * 60 * 60 * 1000;
 
 function initialState(): ApplianceState {
 	return { schemaVersion: APPLIANCE_STATE_SCHEMA_VERSION, revision: 0 };
@@ -189,15 +188,6 @@ async function atomicWriteJson(file: string, value: unknown): Promise<void> {
 	}
 }
 
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return errorCode(error) !== "ESRCH";
-	}
-}
-
 export class FileApplianceStore implements ApplianceStore {
 	readonly root: string;
 	readonly #beforeWrite?: (root: string) => Promise<void>;
@@ -305,35 +295,26 @@ export class FileApplianceStore implements ApplianceStore {
 	async withInstallLock<T>(run: () => Promise<T>): Promise<T> {
 		await this.#ensureWriteReady();
 		const lockPath = path.join(this.root, LOCK_FILE);
-		let handle: fs.FileHandle | undefined;
-		for (let attempt = 0; attempt < 2; attempt += 1) {
-			try {
-				handle = await fs.open(lockPath, "wx", 0o600);
-				break;
-			} catch (error) {
-				if (errorCode(error) !== "EEXIST") throw error;
-				let stale = false;
-				try {
-					const [raw, stat] = await Promise.all([fs.readFile(lockPath, "utf8"), fs.stat(lockPath)]);
-					const owner: unknown = JSON.parse(raw);
-					const ownerPid = isRecord(owner) && typeof owner.pid === "number" ? owner.pid : undefined;
-					stale = ownerPid === undefined ? Date.now() - stat.mtimeMs > LOCK_STALE_MS : !isProcessAlive(ownerPid);
-				} catch {
-					const stat = await fs.stat(lockPath);
-					stale = Date.now() - stat.mtimeMs > LOCK_STALE_MS;
-				}
-				if (!stale || attempt > 0) throw new Error("Another appliance transaction is in progress");
-				await fs.rm(lockPath, { force: true });
-			}
-		}
-		if (!handle) throw new Error("Unable to acquire appliance install lock");
+		const token = randomBytes(16).toString("hex");
+		let handle: fs.FileHandle;
 		try {
-			await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`);
+			handle = await fs.open(lockPath, "wx", 0o600);
+		} catch (error) {
+			if (errorCode(error) === "EEXIST") throw new Error("Another appliance transaction is in progress");
+			throw error;
+		}
+		try {
+			await handle.writeFile(
+				`${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString(), token })}\n`,
+			);
 			await handle.sync();
 			return await run();
 		} finally {
 			await handle.close();
-			await fs.rm(lockPath, { force: true });
+			try {
+				const owner: unknown = JSON.parse(await fs.readFile(lockPath, "utf8"));
+				if (isRecord(owner) && owner.token === token) await fs.rm(lockPath);
+			} catch {}
 		}
 	}
 }

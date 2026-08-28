@@ -80,7 +80,7 @@ A stale `previous_response_id` receives exactly one full-transcript replay. The 
 
 The data plane is a loopback NInfer Responses endpoint. The control plane is `omp appliance`: host inspection, release planning, verified asset acquisition, isolated candidate startup, qualification, route promotion, status, checkpoints, and rollback.
 
-Promotion never stops the incumbent first. The prior exact installation remains a rollback target until the restored route is proven. Candidate failure before promotion leaves the route unchanged; ambiguous post-promotion recovery preserves runnable candidates and diagnostics rather than deleting the only evidence.
+Same-port promotion acquires and validates every candidate asset before the cutover, then stops the incumbent, starts and qualifies the candidate, and atomically advances the route. A pre-promotion failure restarts and health-proves the incumbent. The prior exact installation remains a rollback target; ambiguous post-promotion recovery preserves artifacts, secrets, state, and diagnostics without claiming a runnable route it did not prove.
 
 See [Appliance lifecycle](./appliance-lifecycle.md) and [Security and privacy](./security.md).
 

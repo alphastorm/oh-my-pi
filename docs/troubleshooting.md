@@ -103,11 +103,11 @@ OMP should stop the isolated candidate, remove its secret, and leave the incumbe
 
 ## Install failed after promotion
 
-OMP attempts to restore and prove the prior route before stopping the candidate. If proof is ambiguous, it preserves runnable candidates and secrets rather than deleting the only working service. Do not manually tear down either candidate until route and rollback state are understood.
+OMP attempts to restore and prove the prior route before final candidate cleanup. If proof is ambiguous, it preserves release artifacts, secrets, state, and diagnostics without claiming either route is runnable. Do not manually tear down either release until route and rollback state are understood.
 
 ## Rollback is blocked or fails proof
 
-Rollback requires a preserved target. It must prove direct health, restore the route atomically, and prove a routed request. A failed proof is not a successful rollback. Preserve both runtimes and diagnostics; never substitute a cloud route as rollback.
+Rollback requires a preserved target. It must prove direct health, restore the route atomically, and prove a routed request. A failed proof is not a successful rollback. Preserve both release artifacts and diagnostics; never substitute a cloud route as rollback.
 
 ## Support output seems too sparse
 

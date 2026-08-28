@@ -87,7 +87,7 @@ A checkpoint is acceleration state. Deleting it does not delete the authoritativ
 
 ## Rollback contract
 
-Promotion preserves the exact prior installation. Rollback proves the old runtime directly, restores its route atomically, and proves a routed request before stopping the outgoing candidate. If recovery cannot be proven, OMP preserves both runnable candidates, secrets, and diagnostics rather than deleting evidence or claiming success.
+Promotion preserves the exact prior installation metadata and artifacts. Rollback proves the old runtime directly, restores its route atomically, and proves a routed request before final cleanup. If recovery cannot be proven, OMP preserves both release artifacts, secrets, state, and diagnostics rather than deleting evidence or claiming that either route is runnable.
 
 Rollback never weakens artifact verification and never changes the no-cloud-fallback rule.
 

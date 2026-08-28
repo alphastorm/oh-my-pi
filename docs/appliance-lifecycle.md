@@ -155,9 +155,9 @@ Checkpoint state remains disposable. Missing, incompatible, corrupt, disabled, o
 
 ## Rollback
 
-`rollback` requires a preserved rollback target. It starts the prior runtime if necessary, proves direct health, atomically restores its route, and proves a routed request before stopping the outgoing candidate.
+`rollback` requires a preserved rollback target. At the same-port cutover it stops the outgoing runtime, starts and directly health-proves the prior runtime, atomically restores its route, and proves a routed request before final cleanup.
 
-If routed proof fails, OMP restores and re-proves the outgoing route when possible. Both runtimes and diagnostic files remain available on an unproven recovery. Rollback never switches to cloud or relaxes checksum/profile validation.
+If routed proof fails, OMP stops the failed target, restarts and health-proves the outgoing runtime, restores its route, and proves a routed request when possible. An unproven recovery retains both release artifacts, secrets, state, and diagnostics but does not claim either route is runnable. Rollback never switches to cloud or relaxes checksum/profile validation.
 
 ## State and receipts
 

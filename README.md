@@ -22,6 +22,10 @@
   Fork of <a href="https://github.com/badlogic/pi-mono">Pi</a> by <a href="https://github.com/mariozechner">@mariozechner</a> 
 </p>
 
+> This `alphastorm/oh-my-pi` fork publishes the OMP NInfer beta source and its prerelease assets.
+> Links to `can1357/oh-my-pi` intentionally identify the canonical upstream OMP project, changelog,
+> package issue tracker, and license rather than claiming those upstream surfaces for this fork.
+
 ## Keep long coding sessions private and warm
 
 OMP's local Qwen3.8 appliance is built around the outcome that matters: the authoritative coding transcript stays in OMP, while authenticated NInfer state on GPUs you control accelerates continuation. Warm sessions remain sticky to the endpoint that owns them; fresh foreground and background work can use a qualified RTX 5090/4090 fleet without making provider state the conversation.

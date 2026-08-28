@@ -125,9 +125,8 @@ class MemoryStore implements ApplianceStore {
 	}
 
 	async readSecret(secretRef: string): Promise<string> {
-		const secret = this.secrets.get(secretRef);
-		if (!secret) throw new Error("missing-secret");
-		return secret;
+		if (!this.secrets.has(secretRef)) throw new Error("missing-secret");
+		return this.secrets.get(secretRef)!;
 	}
 
 	async removeSecret(secretRef: string): Promise<void> {
@@ -310,6 +309,7 @@ class FakePlatform implements AppliancePlatform {
 			schemaVersion: 1,
 			sessionSha256,
 			state: operation === "delete" ? "deleted" : "available",
+			generation: "generation-1",
 			bytes: 4096,
 			frontierTokens: 32768,
 			responseRecords: 2,
@@ -444,7 +444,13 @@ describe("appliance lifecycle", () => {
 		expect(receipt).toMatchObject({
 			action: "checkpoint",
 			status: "ok",
-			details: { operation: "save", sessionSha256, state: "available", bytes: 4096 },
+			details: {
+				operation: "save",
+				sessionSha256,
+				state: "available",
+				generation: "generation-1",
+				bytes: 4096,
+			},
 		});
 		expect(platform.checkpointCalls).toEqual([{ installationId: "active", operation: "save", sessionSha256 }]);
 		expect(JSON.stringify(receipt)).not.toContain("super-secret-checkpoint");
@@ -810,8 +816,35 @@ describe("appliance lifecycle", () => {
 			"incumbent:start:incumbent",
 			"health:incumbent",
 			"routed:incumbent",
+			"incumbent:stop:incumbent",
+			"incumbent:start:candidate",
+			"health:candidate",
 			"routed:candidate",
 		]);
+	});
+
+	it("never restarts a rollback candidate with an empty persisted secret", async () => {
+		const { lifecycle, store, platform, profile } = harness();
+		const incumbentProfile = { ...profile, profile: "rtx4090-windows" as const, release: undefined };
+		const candidateRef = "secrets/candidate.key";
+		const incumbentRef = "secrets/incumbent.key";
+		const candidate = installation("candidate", profile, candidateRef, 8000);
+		const incumbent = installation("incumbent", incumbentProfile, incumbentRef, 9000);
+		store.secrets.set(candidateRef, "");
+		store.secrets.set(incumbentRef, "incumbent-secret");
+		store.state = { schemaVersion: 1, revision: 7, active: candidate, rollbackTarget: incumbent };
+		platform.failRoutedInstallations.add("incumbent");
+
+		const receipt = await lifecycle.rollback();
+
+		expect(receipt.status).toBe("failed");
+		expect(receipt.details).toMatchObject({
+			failureStage: "incumbent-routed-request",
+			routeRestored: false,
+			candidateProven: false,
+			candidatePreserved: false,
+		});
+		expect(platform.events).not.toContain("incumbent:start:candidate");
 	});
 
 	it("keeps receipts, status, and logs free of secrets and private references", async () => {

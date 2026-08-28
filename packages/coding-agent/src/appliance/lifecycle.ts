@@ -196,7 +196,7 @@ export class ApplianceLifecycle {
 		let endpoint: Record<string, unknown> | undefined;
 		if (state.active) {
 			try {
-				const secret = await this.#store.readSecret(state.active.route.secretRef);
+				const secret = await this.#readSecret(state.active.route.secretRef);
 				endpoint = publicEndpointStatus(await this.#platform.readEndpointStatus(state.active, secret));
 			} catch {
 				endpoint = { reachable: false };
@@ -362,8 +362,7 @@ export class ApplianceLifecycle {
 				const modelRef = await this.#platform.acquireArtifact(profile.assets.model);
 				stage = "secret-create";
 				secretRef = await this.#store.createSecret(installationId);
-				const secret = await this.#store.readSecret(secretRef);
-				if (!secret) throw new Error("empty-appliance-secret");
+				const secret = await this.#readSecret(secretRef);
 				stage = "candidate-create";
 				candidate = await this.#platform.createCandidate({
 					profile,
@@ -488,7 +487,7 @@ export class ApplianceLifecycle {
 				let incumbentRestored = state.pending?.stage !== "after-predecessor-stop";
 				if (!incumbentRestored && state.pending?.predecessor) {
 					try {
-						const predecessorSecret = await this.#store.readSecret(state.pending.predecessor.route.secretRef);
+						const predecessorSecret = await this.#readSecret(state.pending.predecessor.route.secretRef);
 						await this.#platform.startInstallation(state.pending.predecessor, predecessorSecret);
 						await this.#retryHealth(state.pending.predecessor, predecessorSecret);
 						incumbentRestored = true;
@@ -533,7 +532,7 @@ export class ApplianceLifecycle {
 		const endpoints = await Promise.all(
 			installations.map(async installation => {
 				try {
-					const secret = await this.#store.readSecret(installation.route.secretRef);
+					const secret = await this.#readSecret(installation.route.secretRef);
 					return {
 						profile: installation.profile,
 						endpoint: publicEndpointStatus(await this.#platform.readEndpointStatus(installation, secret)),
@@ -570,7 +569,7 @@ export class ApplianceLifecycle {
 		const state = await this.#store.readState();
 		if (!state.active) return this.#receipt("benchmark", "blocked", { blocker: "No active appliance route" });
 		try {
-			const secret = await this.#store.readSecret(state.active.route.secretRef);
+			const secret = await this.#readSecret(state.active.route.secretRef);
 			const qualification = await this.#platform.quickQualification(state.active, secret);
 			const receipt = this.#receipt("benchmark", qualification.ok ? "ok" : "failed", {
 				profile: state.active.profile,
@@ -634,7 +633,7 @@ export class ApplianceLifecycle {
 				return receipt;
 			}
 			try {
-				const secret = await this.#store.readSecret(installation.route.secretRef);
+				const secret = await this.#readSecret(installation.route.secretRef);
 				const result = await this.#platform.checkpoint(installation, secret, operation, sessionSha256);
 				const receiptStatus =
 					result.state === "disabled"
@@ -647,6 +646,7 @@ export class ApplianceLifecycle {
 					sessionSha256,
 					profile: installation.profile,
 					state: result.state,
+					generation: result.generation,
 					bytes: result.bytes,
 					frontierTokens: result.frontierTokens,
 					restoredTokens: result.restoredTokens,
@@ -701,7 +701,7 @@ export class ApplianceLifecycle {
 			let stage = "incumbent-proof";
 			let switched = false;
 			try {
-				const incumbentSecret = await this.#store.readSecret(incumbent.route.secretRef);
+				const incumbentSecret = await this.#readSecret(incumbent.route.secretRef);
 				if (state.pending?.stage === "before-predecessor-stop") {
 					stage = "candidate-stop";
 					await this.#platform.stopInstallation(candidate);
@@ -734,16 +734,38 @@ export class ApplianceLifecycle {
 				} catch {
 					let routeRestored = false;
 					let candidateProven = false;
+					let candidateRestarted = false;
+					let incumbentStopped = false;
 					try {
-						await this.#store.writeState({ ...state, revision: state.revision + 2 }, state.revision + 1);
-						routeRestored = true;
-						const candidateSecret = await this.#store.readSecret(candidate.route.secretRef);
+						const candidateSecret = await this.#readSecret(candidate.route.secretRef);
+						await this.#platform.stopInstallation(incumbent);
+						incumbentStopped = true;
+						await this.#platform.startInstallation(candidate, candidateSecret);
+						candidateRestarted = true;
+						await this.#retryHealth(candidate, candidateSecret);
 						await this.#platform.probeRoutedRequest(candidate, candidateSecret);
+						await this.#store.writeState(
+							{ ...state, revision: state.revision + 2, pending: undefined },
+							state.revision + 1,
+						);
+						routeRestored = true;
 						candidateProven = true;
-					} catch {}
+					} catch {
+						if (candidateRestarted) {
+							try {
+								await this.#platform.stopInstallation(candidate);
+							} catch {}
+						}
+						if (incumbentStopped) {
+							try {
+								await this.#platform.startInstallation(incumbent, incumbentSecret);
+								await this.#retryHealth(incumbent, incumbentSecret);
+							} catch {}
+						}
+					}
 					const receipt = this.#receipt("rollback", "failed", {
 						failureStage: stage,
-						candidatePreserved: true,
+						candidatePreserved: candidateProven,
 						routeRestored,
 						candidateProven,
 					});
@@ -781,7 +803,7 @@ export class ApplianceLifecycle {
 				let candidateRestored = state.pending?.stage !== "after-predecessor-stop";
 				if (!candidateRestored) {
 					try {
-						const candidateSecret = await this.#store.readSecret(candidate.route.secretRef);
+						const candidateSecret = await this.#readSecret(candidate.route.secretRef);
 						await this.#platform.startInstallation(candidate, candidateSecret);
 						await this.#retryHealth(candidate, candidateSecret);
 						candidateRestored = true;
@@ -817,6 +839,12 @@ export class ApplianceLifecycle {
 		return receipt;
 	}
 
+	async #readSecret(secretRef: string): Promise<string> {
+		const secret = await this.#store.readSecret(secretRef);
+		if (!secret) throw new Error("empty-appliance-secret");
+		return secret;
+	}
+
 	async #retryHealth(target: Parameters<AppliancePlatform["probeHealth"]>[0], secret: string): Promise<void> {
 		for (let attempt = 1; attempt <= this.#probeAttempts; attempt += 1) {
 			try {
@@ -833,12 +861,12 @@ export class ApplianceLifecycle {
 		if (state.pending || !state.active) return false;
 		let secret: string;
 		try {
-			secret = await this.#store.readSecret(state.active.route.secretRef);
+			secret = await this.#readSecret(state.active.route.secretRef);
 			await this.#platform.probeHealth(state.active, secret);
 			return true;
 		} catch {}
 		try {
-			secret ??= await this.#store.readSecret(state.active.route.secretRef);
+			secret ??= await this.#readSecret(state.active.route.secretRef);
 			await this.#platform.startInstallation(state.active, secret);
 			await this.#retryHealth(state.active, secret);
 			return true;
@@ -855,7 +883,7 @@ export class ApplianceLifecycle {
 		let priorSecret: string | undefined;
 		if (prior.active) {
 			try {
-				priorSecret = await this.#store.readSecret(prior.active.route.secretRef);
+				priorSecret = await this.#readSecret(prior.active.route.secretRef);
 				await this.#platform.startInstallation(prior.active, priorSecret);
 				await this.#retryHealth(prior.active, priorSecret);
 			} catch {
@@ -962,7 +990,7 @@ export class ApplianceLifecycle {
 			blockers.push("No active appliance route");
 		} else {
 			try {
-				const secret = await this.#store.readSecret(active.route.secretRef);
+				const secret = await this.#readSecret(active.route.secretRef);
 				qualification = await this.#platform.quickQualification(active, secret);
 				if (!qualification.ok) blockers.push("Quick qualification failed");
 			} catch {

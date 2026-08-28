@@ -1,3 +1,4 @@
+import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import {
 	BoundedApplianceExecutor,
 	type BoundedCommandResult,
@@ -159,7 +160,7 @@ export class SshApplianceExecutor {
 			runner: options.runner,
 			timeoutMs: options.timeoutMs ?? REMOTE_LIFECYCLE_TIMEOUT_MS,
 		});
-		this.#expectedVersion = options.expectedVersion ?? "18.0.9";
+		this.#expectedVersion = options.expectedVersion ?? VERSION;
 	}
 
 	#command(remoteArgv: readonly string[]): string[] {

@@ -19,6 +19,7 @@ import {
 	remoteDelegationManifest,
 } from "@oh-my-pi/pi-coding-agent/appliance/remote-protocol";
 import type { ApplianceAction, ApplianceProfile, ApplianceReceipt } from "@oh-my-pi/pi-coding-agent/appliance/types";
+import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 
 function compatibility(text = '{"schema_version":1}'): RemoteApplianceCompatibility {
 	const bytes = Buffer.from(text, "utf8");
@@ -44,7 +45,7 @@ function receipt(
 			...details,
 			remoteDelegation: {
 				schemaVersion: 1,
-				version: "18.0.9",
+				version: VERSION,
 				buildIdentity: REMOTE_APPLIANCE_BUILD_ID,
 				compatibilitySha256: compatibilityAuthority?.sha256 ?? null,
 				transportProfile: compatibilityAuthority?.transportProfile ?? null,
@@ -280,7 +281,7 @@ describe("SSH appliance lifecycle delegation", () => {
 			details: {
 				remoteDelegation: {
 					schemaVersion: 1,
-					version: "18.0.9",
+					version: VERSION,
 					buildIdentity: REMOTE_APPLIANCE_BUILD_ID,
 					compatibilitySha256: authority.sha256,
 					transportProfile: "darwin-remote-ssh",
@@ -317,7 +318,7 @@ describe("SSH appliance lifecycle delegation", () => {
 			details: {
 				remoteDelegation: {
 					schemaVersion: 1,
-					version: "18.0.9",
+					version: VERSION,
 					buildIdentity: REMOTE_APPLIANCE_BUILD_ID,
 					compatibilitySha256: authority.sha256,
 					transportProfile: "darwin-remote-ssh",

@@ -1,13 +1,10 @@
-import type { NInferCheckpointOperation } from "@oh-my-pi/pi-ai/providers/ninfer";
-import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	loadCompatibilityAuthority,
-	type CompatibilityAuthority,
-} from "./compatibility-authority";
+import type { NInferCheckpointOperation } from "@oh-my-pi/pi-ai/providers/ninfer";
+import { VERSION } from "@oh-my-pi/pi-utils/dirs";
+import { type CompatibilityAuthority, loadCompatibilityAuthority } from "./compatibility-authority";
 import type {
 	ApplianceAction,
 	ApplianceGpuSelector,
@@ -16,8 +13,7 @@ import type {
 	ApplianceReceipt,
 } from "./types";
 
-export const REMOTE_APPLIANCE_BUILD_ID =
-	"sha256:daa63c6f2cdcd18c66079503e847e78551bce5ef2b3384ad462fb7340eb6ec1c";
+export const REMOTE_APPLIANCE_BUILD_ID = "sha256:daa63c6f2cdcd18c66079503e847e78551bce5ef2b3384ad462fb7340eb6ec1c";
 export const REMOTE_APPLIANCE_AUTHORITY_LIMIT = 64 * 1024;
 export const REMOTE_APPLIANCE_PAYLOAD_LIMIT = 16 * 1024;
 export const REMOTE_APPLIANCE_RECEIPT_LIMIT = 256 * 1024;
@@ -119,22 +115,24 @@ export interface RemoteDelegationMetadata extends JsonRecord {
 }
 
 function record(value: unknown, label: string): JsonRecord {
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(label + " must be an object");
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
 	return value as JsonRecord;
 }
 
 function exactKeys(value: JsonRecord, required: readonly string[], optional: readonly string[], label: string): void {
 	const allowed = new Set([...required, ...optional]);
-	for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(label + " contains an unknown field");
-	for (const key of required) if (!(key in value)) throw new Error(label + " is missing " + key);
+	for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`${label} contains an unknown field`);
+	for (const key of required) if (!(key in value)) throw new Error(`${label} is missing ${key}`);
 }
 
 function safeString(value: unknown, label: string, maximum = 256): string {
 	if (
-		typeof value !== "string" || value.length === 0 || value.length > maximum ||
+		typeof value !== "string" ||
+		value.length === 0 ||
+		value.length > maximum ||
 		/[\u0000-\u001f\u007f]/u.test(value)
 	) {
-		throw new Error(label + " is invalid");
+		throw new Error(`${label} is invalid`);
 	}
 	return value;
 }
@@ -161,7 +159,11 @@ function wslDistribution(value: unknown): string {
 function canonicalArgv(invocation: RemoteApplianceInvocation): string[] {
 	switch (invocation.action) {
 		case "doctor":
-			return ["doctor", ...(invocation.port === undefined ? [] : ["--port", String(port(invocation.port))]), "--json"];
+			return [
+				"doctor",
+				...(invocation.port === undefined ? [] : ["--port", String(port(invocation.port))]),
+				"--json",
+			];
 		case "plan":
 		case "install": {
 			if (invocation.model !== "qwen3.8") throw new Error("Remote plan/install requires model qwen3.8");
@@ -187,7 +189,8 @@ function canonicalArgv(invocation: RemoteApplianceInvocation): string[] {
 			if (!["save", "status", "delete"].includes(invocation.checkpointOperation ?? "")) {
 				throw new Error("Remote checkpoint operation is invalid");
 			}
-			if (!SESSION_SHA256.test(invocation.sessionSha256 ?? "")) throw new Error("Remote checkpoint session SHA-256 is invalid");
+			if (!SESSION_SHA256.test(invocation.sessionSha256 ?? ""))
+				throw new Error("Remote checkpoint session SHA-256 is invalid");
 			return [
 				"checkpoint",
 				invocation.checkpointOperation!,
@@ -220,8 +223,11 @@ function invocationFromArgv(value: unknown): RemoteApplianceInvocation {
 		case "install": {
 			const hasPort = argv.length === 7;
 			if (
-				(argv.length !== 5 && !hasPort) || argv[1] !== "qwen3.8" || argv[2] !== "--gpu" ||
-				!["auto", "rtx5090", "rtx4090"].includes(argv[3] ?? "") || argv.at(-1) !== "--json" ||
+				(argv.length !== 5 && !hasPort) ||
+				argv[1] !== "qwen3.8" ||
+				argv[2] !== "--gpu" ||
+				!["auto", "rtx5090", "rtx4090"].includes(argv[3] ?? "") ||
+				argv.at(-1) !== "--json" ||
 				(hasPort && argv[4] !== "--port")
 			) {
 				throw new Error("Remote plan/install argv is not canonical");
@@ -248,8 +254,11 @@ function invocationFromArgv(value: unknown): RemoteApplianceInvocation {
 			break;
 		case "checkpoint":
 			if (
-				argv.length !== 5 || !["save", "status", "delete"].includes(argv[1] ?? "") ||
-				argv[2] !== "--session-sha256" || !SESSION_SHA256.test(argv[3] ?? "") || argv[4] !== "--json"
+				argv.length !== 5 ||
+				!["save", "status", "delete"].includes(argv[1] ?? "") ||
+				argv[2] !== "--session-sha256" ||
+				!SESSION_SHA256.test(argv[3] ?? "") ||
+				argv[4] !== "--json"
 			) {
 				throw new Error("Remote checkpoint argv is not canonical");
 			}
@@ -287,7 +296,8 @@ export function encodeRemoteApplianceRequest(
 		if (compatibility.bytes.byteLength > REMOTE_APPLIANCE_AUTHORITY_LIMIT) {
 			throw new Error("Compatibility authority exceeds the remote staging limit");
 		}
-		if (digest(compatibility.bytes) !== compatibility.sha256) throw new Error("Compatibility authority digest mismatch");
+		if (digest(compatibility.bytes) !== compatibility.sha256)
+			throw new Error("Compatibility authority digest mismatch");
 		request.compatibility = {
 			sha256: compatibility.sha256,
 			byteLength: compatibility.bytes.byteLength,
@@ -297,7 +307,7 @@ export function encodeRemoteApplianceRequest(
 		throw new Error("Remote lifecycle actions require an exact compatibility authority");
 	}
 	if (delegatedWslDistribution !== undefined) {
-		if (!compatibility || compatibility.transportProfile !== "darwin-remote-ssh") {
+		if (compatibility?.transportProfile !== "darwin-remote-ssh") {
 			throw new Error("Remote WSL delegation requires darwin-remote-ssh compatibility authority");
 		}
 		request.wslDistribution = wslDistribution(delegatedWslDistribution);
@@ -315,7 +325,8 @@ export function decodeRemoteApplianceRequest(
 	authorityBytes: Uint8Array = new Uint8Array(),
 ): DecodedRemoteApplianceRequest {
 	if (
-		payload.length === 0 || Buffer.byteLength(payload, "ascii") > REMOTE_APPLIANCE_PAYLOAD_LIMIT ||
+		payload.length === 0 ||
+		Buffer.byteLength(payload, "ascii") > REMOTE_APPLIANCE_PAYLOAD_LIMIT ||
 		!SAFE_PAYLOAD.test(payload)
 	) {
 		throw new Error("Remote appliance request payload is invalid");
@@ -330,15 +341,16 @@ export function decodeRemoteApplianceRequest(
 		"Remote appliance request",
 	);
 	if (
-		request.schemaVersion !== 1 || request.kind !== "omp-appliance-delegation-request" ||
-		request.expectedVersion !== VERSION || request.expectedBuildIdentity !== REMOTE_APPLIANCE_BUILD_ID
+		request.schemaVersion !== 1 ||
+		request.kind !== "omp-appliance-delegation-request" ||
+		request.expectedVersion !== VERSION ||
+		request.expectedBuildIdentity !== REMOTE_APPLIANCE_BUILD_ID
 	) {
 		throw new Error("Remote appliance request identity does not match this client");
 	}
 	const invocation = invocationFromArgv(request.argv);
-	const delegatedWslDistribution = request.wslDistribution === undefined
-		? undefined
-		: wslDistribution(request.wslDistribution);
+	const delegatedWslDistribution =
+		request.wslDistribution === undefined ? undefined : wslDistribution(request.wslDistribution);
 	if (expectedAction !== undefined && invocation.action !== expectedAction) {
 		throw new Error("Remote appliance request action does not match its command");
 	}
@@ -346,7 +358,8 @@ export function decodeRemoteApplianceRequest(
 		if (delegatedWslDistribution !== undefined) {
 			throw new Error("Remote WSL delegation requires darwin-remote-ssh compatibility authority");
 		}
-		if (authorityBytes.byteLength !== 0) throw new Error("Profileless remote action received unexpected authority bytes");
+		if (authorityBytes.byteLength !== 0)
+			throw new Error("Profileless remote action received unexpected authority bytes");
 		if (invocation.action !== "doctor" && invocation.action !== "status") {
 			throw new Error("Remote lifecycle actions require an exact compatibility authority");
 		}
@@ -358,7 +371,8 @@ export function decodeRemoteApplianceRequest(
 	if (!SHA256.test(sha256)) throw new Error("Compatibility authority SHA-256 is invalid");
 	if (compatibility.transportProfile !== "darwin-remote-ssh") throw new Error("Remote transport profile is invalid");
 	if (
-		!Number.isSafeInteger(compatibility.byteLength) || (compatibility.byteLength as number) < 1 ||
+		!Number.isSafeInteger(compatibility.byteLength) ||
+		(compatibility.byteLength as number) < 1 ||
 		(compatibility.byteLength as number) > REMOTE_APPLIANCE_AUTHORITY_LIMIT ||
 		authorityBytes.byteLength !== compatibility.byteLength
 	) {
@@ -439,10 +453,17 @@ export function assertTransportSafeReceipt(receipt: ApplianceReceipt, expectedAc
 	const bytes = Buffer.byteLength(serialized, "utf8");
 	if (bytes > REMOTE_APPLIANCE_RECEIPT_LIMIT) throw new Error("Remote appliance receipt is oversized");
 	if (
-		receipt.schemaVersion !== 1 || receipt.action !== expectedAction || !RECEIPT_STATUSES.has(receipt.status) ||
-		typeof receipt.receiptId !== "string" || receipt.receiptId.length === 0 || receipt.receiptId.length > 256 ||
-		/[\u0000-\u001f\u007f]/u.test(receipt.receiptId) || typeof receipt.timestamp !== "string" ||
-		!Number.isFinite(Date.parse(receipt.timestamp)) || !receipt.details || typeof receipt.details !== "object" ||
+		receipt.schemaVersion !== 1 ||
+		receipt.action !== expectedAction ||
+		!RECEIPT_STATUSES.has(receipt.status) ||
+		typeof receipt.receiptId !== "string" ||
+		receipt.receiptId.length === 0 ||
+		receipt.receiptId.length > 256 ||
+		/[\u0000-\u001f\u007f]/u.test(receipt.receiptId) ||
+		typeof receipt.timestamp !== "string" ||
+		!Number.isFinite(Date.parse(receipt.timestamp)) ||
+		!receipt.details ||
+		typeof receipt.details !== "object" ||
 		Array.isArray(receipt.details)
 	) {
 		throw new Error("Remote appliance receipt contract mismatch");
@@ -475,13 +496,20 @@ function stringArraysEqual(left: readonly string[], right: readonly string[]): b
 
 function profilesMatch(transport: ApplianceProfile, local: ApplianceProfile): boolean {
 	return (
-		transport.release === local.release && transport.architecture === local.architecture &&
-		transport.artifactSha256 === local.artifactSha256 && transport.contextWindow === local.contextWindow &&
-		transport.maxTokens === local.maxTokens && transport.kvDtype === local.kvDtype &&
-		transport.speculation === local.speculation && transport.concurrency === local.concurrency &&
-		transport.preserveThinking === local.preserveThinking && transport.protocol === local.protocol &&
-		transport.servedModel === local.servedModel && transport.defaultPort === local.defaultPort &&
-		transport.minVramGiB === local.minVramGiB && transport.minimumDiskGiB === local.minimumDiskGiB &&
+		transport.release === local.release &&
+		transport.architecture === local.architecture &&
+		transport.artifactSha256 === local.artifactSha256 &&
+		transport.contextWindow === local.contextWindow &&
+		transport.maxTokens === local.maxTokens &&
+		transport.kvDtype === local.kvDtype &&
+		transport.speculation === local.speculation &&
+		transport.concurrency === local.concurrency &&
+		transport.preserveThinking === local.preserveThinking &&
+		transport.protocol === local.protocol &&
+		transport.servedModel === local.servedModel &&
+		transport.defaultPort === local.defaultPort &&
+		transport.minVramGiB === local.minVramGiB &&
+		transport.minimumDiskGiB === local.minimumDiskGiB &&
 		stringArraysEqual(transport.capabilities, local.capabilities) &&
 		stringArraysEqual(transport.aliases, local.aliases) &&
 		transport.assets?.runtime.sha256 === local.assets?.runtime.sha256 &&
@@ -525,7 +553,7 @@ function failureReceipt(
 ): ApplianceReceipt {
 	return {
 		schemaVersion: 1,
-		receiptId: "remote-bootstrap-" + randomUUID(),
+		receiptId: `remote-bootstrap-${randomUUID()}`,
 		action: request.invocation.action,
 		status: "failed",
 		timestamp: new Date().toISOString(),
@@ -545,7 +573,8 @@ export async function runRemoteApplianceDelegation(
 	},
 ): Promise<ApplianceReceipt> {
 	const createOperationRoot = options.createOperationRoot ?? (() => mkdtemp(join(tmpdir(), "omp-appliance-remote-")));
-	const writeCompatibility = options.writeCompatibility ?? ((path, bytes) => writeFile(path, bytes, { flag: "wx", mode: 0o600 }));
+	const writeCompatibility =
+		options.writeCompatibility ?? ((path, bytes) => writeFile(path, bytes, { flag: "wx", mode: 0o600 }));
 	const removeOperationRoot = options.removeOperationRoot ?? (path => rm(path, { recursive: true, force: false }));
 	let operationRoot: string | undefined;
 	let localProfile: ApplianceProfile | undefined;
@@ -560,10 +589,10 @@ export async function runRemoteApplianceDelegation(
 		if (
 			request.compatibility &&
 			(environment.WSL_INTEROP !== undefined || request.wslDistribution !== undefined) &&
-			(
-				platform !== "linux" || environment.WSL_INTEROP === undefined ||
-				request.wslDistribution === undefined || environment.WSL_DISTRO_NAME !== request.wslDistribution
-			)
+			(platform !== "linux" ||
+				environment.WSL_INTEROP === undefined ||
+				request.wslDistribution === undefined ||
+				environment.WSL_DISTRO_NAME !== request.wslDistribution)
 		) {
 			failureCode = "REMOTE_WSL_CONTEXT_MISMATCH";
 		}
@@ -575,21 +604,20 @@ export async function runRemoteApplianceDelegation(
 				const authorityPath = join(operationRoot, "compatibility.json");
 				await writeCompatibility(authorityPath, request.compatibility.bytes);
 				authority = await loadCompatibilityAuthority(authorityPath, request.compatibility.sha256);
-				const transport = authority.profiles.find(profile => profile.profile === request.compatibility!.transportProfile);
+				const transport = authority.profiles.find(
+					profile => profile.profile === request.compatibility!.transportProfile,
+				);
 				const localProfileId =
-					platform === "linux"
-						? "linux-docker-local"
-						: platform === "win32"
-							? "windows-docker-local"
-							: undefined;
+					platform === "linux" ? "linux-docker-local" : platform === "win32" ? "windows-docker-local" : undefined;
 				localProfile = authority.profiles.find(profile => profile.profile === localProfileId);
-				const transportMustBeInstallable = request.invocation.action !== "doctor" && request.invocation.action !== "status";
+				const transportMustBeInstallable =
+					request.invocation.action !== "doctor" && request.invocation.action !== "status";
 				if (
-					!transport || !transport.lifecycleCommands?.includes(request.invocation.action) ||
+					!transport?.lifecycleCommands?.includes(request.invocation.action) ||
 					(transportMustBeInstallable && !transport.availability.installable)
 				) {
 					failureCode = "REMOTE_COMPATIBILITY_PROFILE_MISMATCH";
-				} else if (!localProfile || !localProfile.lifecycleCommands?.includes(request.invocation.action)) {
+				} else if (!localProfile?.lifecycleCommands?.includes(request.invocation.action)) {
 					failureCode = "REMOTE_LOCAL_PROFILE_UNAVAILABLE";
 				} else if (!profilesMatch(transport, localProfile)) {
 					failureCode = "REMOTE_COMPATIBILITY_PROFILE_MISMATCH";
@@ -629,7 +657,11 @@ export async function runRemoteApplianceDelegation(
 	}
 	if (!receipt || failureCode) {
 		const confirmed = receipt !== undefined;
-		const effect = confirmed ? "confirmed" : invocationStarted && remoteActionMayPersist(request.invocation.action) ? "uncertain" : "none";
+		const effect = confirmed
+			? "confirmed"
+			: invocationStarted && remoteActionMayPersist(request.invocation.action)
+				? "uncertain"
+				: "none";
 		if (receipt && failureCode === "REMOTE_BOOTSTRAP_CLEANUP_FAILED") {
 			receipt = {
 				...receipt,

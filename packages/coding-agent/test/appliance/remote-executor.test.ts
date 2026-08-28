@@ -1,26 +1,26 @@
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import {
-	RemoteApplianceError,
-	runRemoteCommand,
-	SshApplianceExecutor,
-	type RemoteCommandRunner,
-} from "@oh-my-pi/pi-coding-agent/appliance/remote-executor";
+import type { CompatibilityAuthority } from "@oh-my-pi/pi-coding-agent/appliance/compatibility-authority";
 import {
 	executeRemoteApplianceAction,
 	type RemoteReceiptExecutorFactory,
 } from "@oh-my-pi/pi-coding-agent/appliance/remote-action";
 import {
+	RemoteApplianceError,
+	type RemoteCommandRunner,
+	runRemoteCommand,
+	SshApplianceExecutor,
+} from "@oh-my-pi/pi-coding-agent/appliance/remote-executor";
+import {
 	decodeRemoteApplianceRequest,
 	REMOTE_APPLIANCE_BUILD_ID,
 	REMOTE_APPLIANCE_RECEIPT_LIMIT,
-	remoteDelegationManifest,
 	type RemoteApplianceCompatibility,
+	remoteDelegationManifest,
 } from "@oh-my-pi/pi-coding-agent/appliance/remote-protocol";
-import type { CompatibilityAuthority } from "@oh-my-pi/pi-coding-agent/appliance/compatibility-authority";
 import type { ApplianceAction, ApplianceProfile, ApplianceReceipt } from "@oh-my-pi/pi-coding-agent/appliance/types";
 
-function compatibility(text = "{\"schema_version\":1}"): RemoteApplianceCompatibility {
+function compatibility(text = '{"schema_version":1}'): RemoteApplianceCompatibility {
 	const bytes = Buffer.from(text, "utf8");
 	return {
 		bytes,
@@ -36,7 +36,7 @@ function receipt(
 ): ApplianceReceipt {
 	return {
 		schemaVersion: 1,
-		receiptId: action + "-receipt",
+		receiptId: `${action}-receipt`,
 		action,
 		status: "ok",
 		timestamp: "2026-08-28T11:00:00.000Z",
@@ -57,7 +57,10 @@ function receipt(
 }
 
 function successfulRunner(
-	onRequest?: (request: ReturnType<typeof decodeRemoteApplianceRequest>, command: readonly string[]) => ApplianceReceipt,
+	onRequest?: (
+		request: ReturnType<typeof decodeRemoteApplianceRequest>,
+		command: readonly string[],
+	) => ApplianceReceipt,
 ): { runner: RemoteCommandRunner; commands: string[][] } {
 	const commands: string[][] = [];
 	return {
@@ -93,7 +96,7 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 
 describe("SSH appliance lifecycle delegation", () => {
 	it("verifies one exact remote client then sends one canonical WSL argv payload", async () => {
-		const authority = compatibility("{\"public\":\"bytes only\"}");
+		const authority = compatibility('{"public":"bytes only"}');
 		const state = { installs: 0 };
 		const { runner, commands } = successfulRunner(request => {
 			expect(request.invocation).toEqual({
@@ -102,7 +105,7 @@ describe("SSH appliance lifecycle delegation", () => {
 				gpu: "rtx5090",
 				port: 18089,
 			});
-			expect(Buffer.from(request.compatibility!.bytes).toString("utf8")).toBe("{\"public\":\"bytes only\"}");
+			expect(Buffer.from(request.compatibility!.bytes).toString("utf8")).toBe('{"public":"bytes only"}');
 			expect(request.wslDistribution).toBe("Ubuntu-24.04");
 			state.installs += 1;
 			return receipt("install", authority, { idempotent: false });
@@ -120,9 +123,20 @@ describe("SSH appliance lifecycle delegation", () => {
 		expect(state.installs).toBe(1);
 		expect(commands).toHaveLength(2);
 		expect(commands[0]).toEqual([
-			"/usr/bin/ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ClearAllForwardings=yes",
-			"-o", "ForwardAgent=no", "-o", "ForwardX11=no",
-			"windows-gpu-host", "wsl.exe -d Ubuntu-24.04 --exec omp appliance status --delegation-manifest --json",
+			"/usr/bin/ssh",
+			"-T",
+			"-o",
+			"BatchMode=yes",
+			"-o",
+			"ConnectTimeout=10",
+			"-o",
+			"ClearAllForwardings=yes",
+			"-o",
+			"ForwardAgent=no",
+			"-o",
+			"ForwardX11=no",
+			"windows-gpu-host",
+			"wsl.exe -d Ubuntu-24.04 --exec omp appliance status --delegation-manifest --json",
 		]);
 		const actionCommand = commands[1]!.at(-1)!;
 		expect(actionCommand).toStartWith("wsl.exe -d Ubuntu-24.04 --exec omp appliance install --delegation-payload ");
@@ -131,7 +145,9 @@ describe("SSH appliance lifecycle delegation", () => {
 	});
 
 	it("uses the direct Linux command boundary for profileless doctor/status", async () => {
-		const { runner, commands } = successfulRunner(request => receipt(request.invocation.action, undefined, { installed: false }));
+		const { runner, commands } = successfulRunner(request =>
+			receipt(request.invocation.action, undefined, { installed: false }),
+		);
 		const executor = new SshApplianceExecutor({ host: "omp@gpu.example.internal", runner });
 		const status = await executor.execute("status");
 		expect(status.details.installed).toBe(false);
@@ -148,7 +164,10 @@ describe("SSH appliance lifecycle delegation", () => {
 		expect(String(unavailableError)).not.toContain("/private/remote/log");
 		for (const [manifest, code] of [
 			[{ ...remoteDelegationManifest(), version: "18.0.8" }, "REMOTE_VERSION_MISMATCH"],
-			[{ ...remoteDelegationManifest(), buildIdentity: "sha256:" + "0".repeat(64) }, "REMOTE_BUILD_IDENTITY_MISMATCH"],
+			[
+				{ ...remoteDelegationManifest(), buildIdentity: `sha256:${"0".repeat(64)}` },
+				"REMOTE_BUILD_IDENTITY_MISMATCH",
+			],
 		] as const) {
 			let calls = 0;
 			const executor = new SshApplianceExecutor({
@@ -167,7 +186,10 @@ describe("SSH appliance lifecycle delegation", () => {
 		for (const [stdout, code] of [
 			["banner\n{}", "REMOTE_RECEIPT_MALFORMED"],
 			["x".repeat(REMOTE_APPLIANCE_RECEIPT_LIMIT + 1), "REMOTE_RECEIPT_OVERSIZE"],
-			[JSON.stringify(receipt("doctor", undefined, { message: "state root /home/operator/.omp failed" })), "REMOTE_RECEIPT_MALFORMED"],
+			[
+				JSON.stringify(receipt("doctor", undefined, { message: "state root /home/operator/.omp failed" })),
+				"REMOTE_RECEIPT_MALFORMED",
+			],
 			[JSON.stringify(receipt("doctor")), "REMOTE_RECEIPT_MALFORMED"],
 		] as const) {
 			let calls = 0;
@@ -276,7 +298,14 @@ describe("SSH appliance lifecycle delegation", () => {
 		});
 		expect(result).toMatchObject({
 			status: "failed",
-			details: { remoteDelegation: { localProfile: null, cleanup: "ok", effect: "none", failureCode: "REMOTE_COMPATIBILITY_HASH_MISMATCH" } },
+			details: {
+				remoteDelegation: {
+					localProfile: null,
+					cleanup: "ok",
+					effect: "none",
+					failureCode: "REMOTE_COMPATIBILITY_HASH_MISMATCH",
+				},
+			},
 		});
 	});
 
@@ -306,12 +335,14 @@ describe("SSH appliance lifecycle delegation", () => {
 		});
 		expect(result).toMatchObject({
 			status: "failed",
-			details: { remoteDelegation: { cleanup: "failed", effect: "uncertain", failureCode: "REMOTE_DELEGATED_ACTION_FAILED" } },
+			details: {
+				remoteDelegation: { cleanup: "failed", effect: "uncertain", failureCode: "REMOTE_DELEGATED_ACTION_FAILED" },
+			},
 		});
 	});
 
 	it("keeps every untrusted argument inside one base64url payload", async () => {
-		const injected = compatibility("{\"note\":\"'; touch /tmp/pwned; #\"}");
+		const injected = compatibility('{"note":"\'; touch /tmp/pwned; #"}');
 		const { runner, commands } = successfulRunner();
 		const executor = new SshApplianceExecutor({ host: "windows-gpu-host", runner });
 		await executor.execute("install", { model: "qwen3.8", gpu: "auto", compatibility: injected });
@@ -319,14 +350,16 @@ describe("SSH appliance lifecycle delegation", () => {
 		expect(wire).not.toContain("touch");
 		expect(wire).not.toContain(";");
 		expect(() => new SshApplianceExecutor({ host: "-oProxyCommand=bad" })).toThrow("SSH hostname or alias");
-		expect(() => new SshApplianceExecutor({ host: "windows-gpu-host", wslDistribution: "Ubuntu 24.04; bad" })).toThrow(
-			"invalid characters",
-		);
-		await expect(executor.execute("checkpoint", {
-			checkpointOperation: "save",
-			sessionSha256: "a".repeat(63) + ";",
-			compatibility: injected,
-		})).rejects.toThrow("session SHA-256 is invalid");
+		expect(
+			() => new SshApplianceExecutor({ host: "windows-gpu-host", wslDistribution: "Ubuntu 24.04; bad" }),
+		).toThrow("invalid characters");
+		await expect(
+			executor.execute("checkpoint", {
+				checkpointOperation: "save",
+				sessionSha256: `${"a".repeat(63)};`,
+				compatibility: injected,
+			}),
+		).rejects.toThrow("session SHA-256 is invalid");
 	});
 
 	it("allows profileless remote inspection but requires authority for remote effects", async () => {
@@ -334,18 +367,27 @@ describe("SSH appliance lifecycle delegation", () => {
 		const actions: ApplianceAction[] = [];
 		const factory: RemoteReceiptExecutorFactory = () => {
 			executorCreations += 1;
-			return { execute: async action => { actions.push(action); return receipt(action); } };
+			return {
+				execute: async action => {
+					actions.push(action);
+					return receipt(action);
+				},
+			};
 		};
 		await executeRemoteApplianceAction("doctor", { remote: "windows-gpu-host" }, factory);
 		await executeRemoteApplianceAction("status", { remote: "windows-gpu-host", remoteWsl: "Ubuntu-24.04" }, factory);
 		expect(actions).toEqual(["doctor", "status"]);
-		await expect(executeRemoteApplianceAction("install", { remote: "windows-gpu-host", model: "qwen3.8" }, factory))
-			.rejects.toThrow("exact compatibility authority");
+		await expect(
+			executeRemoteApplianceAction("install", { remote: "windows-gpu-host", model: "qwen3.8" }, factory),
+		).rejects.toThrow("exact compatibility authority");
 		for (const remote of ["", "   "]) {
-			await expect(executeRemoteApplianceAction("doctor", { remote }, factory)).rejects.toThrow("--remote must not be blank");
+			await expect(executeRemoteApplianceAction("doctor", { remote }, factory)).rejects.toThrow(
+				"--remote must not be blank",
+			);
 		}
-		await expect(executeRemoteApplianceAction("doctor", { remoteWsl: "Ubuntu-24.04" }, factory))
-			.rejects.toThrow("--remote-wsl requires --remote");
+		await expect(executeRemoteApplianceAction("doctor", { remoteWsl: "Ubuntu-24.04" }, factory)).rejects.toThrow(
+			"--remote-wsl requires --remote",
+		);
 		expect(executorCreations).toBe(2);
 
 		const bytes = Buffer.from("{}", "utf8");
@@ -357,19 +399,30 @@ describe("SSH appliance lifecycle delegation", () => {
 			bytes,
 			sha256: createHash("sha256").update(bytes).digest("hex"),
 		} as unknown as CompatibilityAuthority;
-		await expect(executeRemoteApplianceAction("status", { authority, selectedProfile }, factory))
-			.rejects.toThrow("requires --remote");
-		await expect(executeRemoteApplianceAction("status", {
-			remote: "windows-gpu-host",
-			selectedProfile: { ...selectedProfile, adapter: "linux-docker-local" },
-		}, factory)).rejects.toThrow("darwin-remote-ssh compatibility profile");
-		await executeRemoteApplianceAction("install", {
-			remote: "windows-gpu-host",
-			model: "qwen3.8",
-			gpu: "auto",
-			authority,
-			selectedProfile,
-		}, factory);
+		await expect(executeRemoteApplianceAction("status", { authority, selectedProfile }, factory)).rejects.toThrow(
+			"requires --remote",
+		);
+		await expect(
+			executeRemoteApplianceAction(
+				"status",
+				{
+					remote: "windows-gpu-host",
+					selectedProfile: { ...selectedProfile, adapter: "linux-docker-local" },
+				},
+				factory,
+			),
+		).rejects.toThrow("darwin-remote-ssh compatibility profile");
+		await executeRemoteApplianceAction(
+			"install",
+			{
+				remote: "windows-gpu-host",
+				model: "qwen3.8",
+				gpu: "auto",
+				authority,
+				selectedProfile,
+			},
+			factory,
+		);
 		expect(executorCreations).toBe(3);
 	});
 

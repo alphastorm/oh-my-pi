@@ -1,12 +1,9 @@
-import type { NInferCheckpointOperation } from "@oh-my-pi/pi-ai/providers/ninfer";
 import path from "node:path";
+import type { NInferCheckpointOperation } from "@oh-my-pi/pi-ai/providers/ninfer";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
 import { Args, CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { BoundedApplianceExecutor } from "../appliance/bounded-executor";
-import {
-	loadCompatibilityAuthority,
-	type CompatibilityAuthority,
-} from "../appliance/compatibility-authority";
+import { type CompatibilityAuthority, loadCompatibilityAuthority } from "../appliance/compatibility-authority";
 import {
 	hardenWindowsApplianceRoot,
 	LinuxDockerAppliancePlatform,
@@ -18,9 +15,9 @@ import { executeRemoteApplianceAction } from "../appliance/remote-action";
 import {
 	decodeRemoteApplianceRequest,
 	REMOTE_APPLIANCE_AUTHORITY_LIMIT,
+	type RemoteDelegatedLocalInvocation,
 	remoteDelegationManifest,
 	runRemoteApplianceDelegation,
-	type RemoteDelegatedLocalInvocation,
 } from "../appliance/remote-protocol";
 import { FileApplianceStore } from "../appliance/store";
 import type {
@@ -45,7 +42,11 @@ const ACTIONS: ApplianceAction[] = [
 const GPU_SELECTORS: ApplianceGpuSelector[] = ["auto", "rtx5090", "rtx4090"];
 const CHECKPOINT_OPERATIONS: NInferCheckpointOperation[] = ["save", "status", "delete"];
 const PROFILE_IDS: ApplianceProfileId[] = [
-	"rtx5090-linux", "rtx4090-windows", "darwin-remote-ssh", "windows-docker-local", "linux-docker-local",
+	"rtx5090-linux",
+	"rtx4090-windows",
+	"darwin-remote-ssh",
+	"windows-docker-local",
+	"linux-docker-local",
 ];
 
 function isApplianceAction(value: string | undefined): value is ApplianceAction {
@@ -227,8 +228,14 @@ export default class Appliance extends Command {
 		"remote-wsl": Flags.string({ description: "WSL distribution on the remote Windows host" }),
 		compatibility: Flags.string({ description: "Exact trusted omp-ninfer compatibility.json authority" }),
 		"compatibility-sha256": Flags.string({ description: "Pinned SHA-256 of compatibility.json" }),
-		"delegation-manifest": Flags.boolean({ description: "Emit the internal remote delegation identity", hidden: true }),
-		"delegation-payload": Flags.string({ description: "Execute one internal remote delegation request", hidden: true }),
+		"delegation-manifest": Flags.boolean({
+			description: "Emit the internal remote delegation identity",
+			hidden: true,
+		}),
+		"delegation-payload": Flags.string({
+			description: "Execute one internal remote delegation request",
+			hidden: true,
+		}),
 	};
 
 	async run(): Promise<void> {
@@ -237,35 +244,50 @@ export default class Appliance extends Command {
 		if (!isApplianceAction(action)) throw new CliUsageError("Unknown appliance action");
 		if (flags["delegation-manifest"]) {
 			if (
-				action !== "status" || !flags.json || flags["delegation-payload"] !== undefined || args.model !== undefined ||
-				flags.remote !== undefined || flags["remote-wsl"] !== undefined || flags.compatibility !== undefined ||
-				flags["compatibility-sha256"] !== undefined || flags.profile !== undefined || flags.port !== undefined ||
-				flags.quick || flags["session-sha256"] !== undefined
+				action !== "status" ||
+				!flags.json ||
+				flags["delegation-payload"] !== undefined ||
+				args.model !== undefined ||
+				flags.remote !== undefined ||
+				flags["remote-wsl"] !== undefined ||
+				flags.compatibility !== undefined ||
+				flags["compatibility-sha256"] !== undefined ||
+				flags.profile !== undefined ||
+				flags.port !== undefined ||
+				flags.quick ||
+				flags["session-sha256"] !== undefined
 			) {
 				throw new CliUsageError("Invalid appliance delegation identity invocation");
 			}
-			process.stdout.write(JSON.stringify(remoteDelegationManifest()) + "\n");
+			process.stdout.write(`${JSON.stringify(remoteDelegationManifest())}\n`);
 			return;
 		}
 		if (flags["delegation-payload"] !== undefined) {
 			if (
-				!flags.json || args.model !== undefined || flags.remote !== undefined || flags["remote-wsl"] !== undefined ||
-				flags.compatibility !== undefined || flags["compatibility-sha256"] !== undefined || flags.profile !== undefined ||
-				flags.port !== undefined || flags.quick || flags["session-sha256"] !== undefined
+				!flags.json ||
+				args.model !== undefined ||
+				flags.remote !== undefined ||
+				flags["remote-wsl"] !== undefined ||
+				flags.compatibility !== undefined ||
+				flags["compatibility-sha256"] !== undefined ||
+				flags.profile !== undefined ||
+				flags.port !== undefined ||
+				flags.quick ||
+				flags["session-sha256"] !== undefined
 			) {
 				throw new CliUsageError("Invalid appliance delegation action invocation");
 			}
 			const authorityBytes = await readDelegatedAuthorityBytes();
 			const request = decodeRemoteApplianceRequest(flags["delegation-payload"], action, authorityBytes);
 			const receipt = await runRemoteApplianceDelegation(request, {
-				invoke: value => executeLocalApplianceInvocation(
-					delegatedInvocation(value),
-					value.authority,
-					value.selectedProfile,
-				),
+				invoke: value =>
+					executeLocalApplianceInvocation(delegatedInvocation(value), value.authority, value.selectedProfile),
 			});
 			writeReceipt(receipt, true);
-			if (receipt.status === "failed" || (receipt.status === "blocked" && action !== "doctor" && action !== "plan")) {
+			if (
+				receipt.status === "failed" ||
+				(receipt.status === "blocked" && action !== "doctor" && action !== "plan")
+			) {
 				process.exitCode = 1;
 			}
 			return;
@@ -273,8 +295,10 @@ export default class Appliance extends Command {
 
 		const gpu = flags.gpu;
 		if (!isGpuSelector(gpu)) throw new CliUsageError("Unknown appliance GPU selector");
-		if (flags.profile !== undefined && !isProfileId(flags.profile)) throw new CliUsageError("Unknown appliance profile");
-		if (flags["remote-wsl"] !== undefined && flags.remote === undefined) throw new CliUsageError("--remote-wsl requires --remote");
+		if (flags.profile !== undefined && !isProfileId(flags.profile))
+			throw new CliUsageError("Unknown appliance profile");
+		if (flags["remote-wsl"] !== undefined && flags.remote === undefined)
+			throw new CliUsageError("--remote-wsl requires --remote");
 		if (flags.port !== undefined && (flags.port < 1 || flags.port > 65535)) {
 			throw new CliUsageError("--port must be between 1 and 65535");
 		}
@@ -294,16 +318,22 @@ export default class Appliance extends Command {
 		}
 		const compatibilityPresent = flags.compatibility !== undefined || flags["compatibility-sha256"] !== undefined;
 		if (compatibilityPresent && (!flags.compatibility || !flags["compatibility-sha256"] || !flags.profile)) {
-			throw new CliUsageError("Compatibility profiles require --compatibility, --compatibility-sha256, and --profile");
+			throw new CliUsageError(
+				"Compatibility profiles require --compatibility, --compatibility-sha256, and --profile",
+			);
 		}
-		if (!compatibilityPresent && ["darwin-remote-ssh", "windows-docker-local", "linux-docker-local"].includes(flags.profile ?? "")) {
+		if (
+			!compatibilityPresent &&
+			["darwin-remote-ssh", "windows-docker-local", "linux-docker-local"].includes(flags.profile ?? "")
+		) {
 			throw new CliUsageError("Managed compatibility profiles require an exact compatibility authority");
 		}
 		const authority = compatibilityPresent
 			? await loadCompatibilityAuthority(flags.compatibility!, flags["compatibility-sha256"]!)
 			: undefined;
 		const selectedProfile = authority?.profiles.find(candidate => candidate.profile === flags.profile);
-		if (authority && !selectedProfile) throw new CliUsageError("Requested profile is absent from the compatibility authority");
+		if (authority && !selectedProfile)
+			throw new CliUsageError("Requested profile is absent from the compatibility authority");
 		if (selectedProfile && !selectedProfile.lifecycleCommands?.includes(action)) {
 			throw new CliUsageError(`Compatibility profile does not declare appliance ${action}`);
 		}
@@ -314,14 +344,17 @@ export default class Appliance extends Command {
 			model: args.model,
 			gpu,
 			quick: flags.quick,
-			checkpointOperation: action === "checkpoint" ? args.model as NInferCheckpointOperation : undefined,
+			checkpointOperation: action === "checkpoint" ? (args.model as NInferCheckpointOperation) : undefined,
 			sessionSha256: flags["session-sha256"],
 			authority,
 			selectedProfile,
 		});
 		if (remoteReceipt) {
 			writeReceipt(remoteReceipt, action === "support-bundle" || Boolean(flags.json));
-			if (remoteReceipt.status === "failed" || (remoteReceipt.status === "blocked" && action !== "doctor" && action !== "plan")) {
+			if (
+				remoteReceipt.status === "failed" ||
+				(remoteReceipt.status === "blocked" && action !== "doctor" && action !== "plan")
+			) {
 				process.exitCode = 1;
 			}
 			return;
@@ -333,7 +366,7 @@ export default class Appliance extends Command {
 				gpu,
 				port: flags.port,
 				quick: flags.quick,
-				checkpointOperation: action === "checkpoint" ? args.model as NInferCheckpointOperation : undefined,
+				checkpointOperation: action === "checkpoint" ? (args.model as NInferCheckpointOperation) : undefined,
 				sessionSha256: flags["session-sha256"],
 				checkpointProfile: flags.profile as ApplianceProfileId | undefined,
 			},

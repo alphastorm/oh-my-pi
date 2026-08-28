@@ -1,17 +1,17 @@
 import { describe, expect, it } from "bun:test";
-import type { NInferCheckpointOperation, NInferCheckpointStatus } from "@oh-my-pi/pi-ai/providers/ninfer";
 import { createHash } from "node:crypto";
 import { rm } from "node:fs/promises";
+import type { NInferCheckpointOperation, NInferCheckpointStatus } from "@oh-my-pi/pi-ai/providers/ninfer";
 import { ApplianceLifecycle } from "@oh-my-pi/pi-coding-agent/appliance/lifecycle";
+import { APPLIANCE_PROFILES } from "@oh-my-pi/pi-coding-agent/appliance/registry";
 import {
+	type DecodedRemoteApplianceRequest,
 	decodeRemoteApplianceRequest,
 	encodeRemoteApplianceRequest,
-	runRemoteApplianceDelegation,
-	type DecodedRemoteApplianceRequest,
 	type RemoteApplianceCompatibility,
 	type RemoteApplianceInvocation,
+	runRemoteApplianceDelegation,
 } from "@oh-my-pi/pi-coding-agent/appliance/remote-protocol";
-import { APPLIANCE_PROFILES } from "@oh-my-pi/pi-coding-agent/appliance/registry";
 import {
 	APPLIANCE_STATE_SCHEMA_VERSION,
 	type ApplianceAction,
@@ -605,11 +605,11 @@ describe("appliance lifecycle", () => {
 		expect(receipt.status).toBe("failed");
 		expect(receipt.details.failureStage).toBe("model-download");
 		expect(store.state.active).toBeUndefined();
-			expect(store.state.pending).toMatchObject({
-				action: "install",
-				stage: "before-predecessor-stop",
-				failureReceiptId: expect.any(String),
-			});
+		expect(store.state.pending).toMatchObject({
+			action: "install",
+			stage: "before-predecessor-stop",
+			failureReceiptId: expect.any(String),
+		});
 		expect(platform.candidateCount).toBe(0);
 		expect(store.secrets.size).toBe(0);
 		expect(JSON.stringify(receipt)).not.toContain("sensitive-path");
@@ -648,11 +648,11 @@ describe("appliance lifecycle", () => {
 			routeChanged: false,
 		});
 		expect(store.state.active).toBeUndefined();
-			expect(store.state.pending).toMatchObject({
-				action: "install",
-				stage: "before-predecessor-stop",
-				failureReceiptId: expect.any(String),
-			});
+		expect(store.state.pending).toMatchObject({
+			action: "install",
+			stage: "before-predecessor-stop",
+			failureReceiptId: expect.any(String),
+		});
 		expect(platform.stopped).toHaveLength(1);
 		expect(store.secrets.size).toBe(0);
 	});
@@ -913,7 +913,10 @@ describe("appliance lifecycle", () => {
 		const failed = await lifecycle.install("qwen3.8", "auto");
 		const installationId = store.state.pending?.installationId;
 		expect(failed.status).toBe("failed");
-		expect(store.state.pending).toMatchObject({ stage: "before-predecessor-stop", failureReceiptId: expect.any(String) });
+		expect(store.state.pending).toMatchObject({
+			stage: "before-predecessor-stop",
+			failureReceiptId: expect.any(String),
+		});
 		platform.failAcquireKind = undefined;
 
 		const resumed = await lifecycle.install("qwen3.8", "auto");
@@ -933,7 +936,10 @@ describe("appliance lifecycle", () => {
 
 		const failed = await lifecycle.install("qwen3.8", "auto");
 
-		expect(failed).toMatchObject({ status: "failed", details: { incumbentPreserved: true, restorationFailed: false } });
+		expect(failed).toMatchObject({
+			status: "failed",
+			details: { incumbentPreserved: true, restorationFailed: false },
+		});
 		expect(store.state.pending?.stage).toBe("before-predecessor-stop");
 		expect(platform.events).toContain("incumbent:start:predecessor");
 		platform.failStartCandidate = false;
@@ -948,12 +954,19 @@ describe("appliance lifecycle", () => {
 });
 
 const MANAGED_COMMANDS: ApplianceAction[] = [
-	"doctor", "plan", "install", "status", "benchmark", "checkpoint", "rollback", "support-bundle",
+	"doctor",
+	"plan",
+	"install",
+	"status",
+	"benchmark",
+	"checkpoint",
+	"rollback",
+	"support-bundle",
 ];
 
 function managedAuthorityProfile(id: "darwin-remote-ssh" | "linux-docker-local") {
 	const publicReceipt = (digit: string) => ({
-		url: "https://releases.example.test/" + digit + ".json",
+		url: `https://releases.example.test/${digit}.json`,
 		sha256: digit.repeat(64),
 	});
 	return {
@@ -974,8 +987,8 @@ function managedAuthorityProfile(id: "darwin-remote-ssh" | "linux-docker-local")
 		acceptance_receipt: publicReceipt("a"),
 		gpu_qualification: { profile: "qwen38-5090-v0.2.0", status: "qualified", receipt: publicReceipt("b") },
 		runtime: {
-			image_reference: "ghcr.io/alphastorm/ninfer@sha256:" + RUNTIME_SHA,
-			image_digest: "sha256:" + RUNTIME_SHA,
+			image_reference: `ghcr.io/alphastorm/ninfer@sha256:${RUNTIME_SHA}`,
+			image_digest: `sha256:${RUNTIME_SHA}`,
 			model_url: "https://releases.example.test/qwen.ninfer",
 			model_bytes: 300,
 			model_sha256: MODEL_SHA,
@@ -1003,11 +1016,14 @@ function managedAuthorityProfile(id: "darwin-remote-ssh" | "linux-docker-local")
 }
 
 function managedCompatibility(): RemoteApplianceCompatibility {
-	const bytes = Buffer.from(JSON.stringify({
-		schema_version: 1,
-		authority_id: "omp-ninfer-v0.2",
-		profiles: [managedAuthorityProfile("darwin-remote-ssh"), managedAuthorityProfile("linux-docker-local")],
-	}), "utf8");
+	const bytes = Buffer.from(
+		JSON.stringify({
+			schema_version: 1,
+			authority_id: "omp-ninfer-v0.2",
+			profiles: [managedAuthorityProfile("darwin-remote-ssh"), managedAuthorityProfile("linux-docker-local")],
+		}),
+		"utf8",
+	);
 	return {
 		bytes,
 		sha256: createHash("sha256").update(bytes).digest("hex"),
@@ -1118,7 +1134,9 @@ describe("remote appliance lifecycle delegation", () => {
 		});
 		expect(mismatched).toMatchObject({
 			status: "failed",
-			details: { remoteDelegation: { failureCode: "REMOTE_WSL_CONTEXT_MISMATCH", effect: "none", localProfile: null } },
+			details: {
+				remoteDelegation: { failureCode: "REMOTE_WSL_CONTEXT_MISMATCH", effect: "none", localProfile: null },
+			},
 		});
 	});
 
@@ -1133,7 +1151,9 @@ describe("remote appliance lifecycle delegation", () => {
 			const request = decodeRemoteApplianceRequest(payload, invocation.action, remote.compatibility.bytes);
 			const failure = await runRemoteApplianceDelegation(request, {
 				platform: "linux",
-				invoke: async () => { throw new Error("transport ended without a receipt"); },
+				invoke: async () => {
+					throw new Error("transport ended without a receipt");
+				},
 			});
 			expect(failure.details.remoteDelegation).toMatchObject({ effect: "uncertain" });
 		}
@@ -1145,7 +1165,9 @@ describe("remote appliance lifecycle delegation", () => {
 		const planRequest = decodeRemoteApplianceRequest(planPayload, "plan", remote.compatibility.bytes);
 		const planFailure = await runRemoteApplianceDelegation(planRequest, {
 			platform: "linux",
-			invoke: async () => { throw new Error("transport ended without a receipt"); },
+			invoke: async () => {
+				throw new Error("transport ended without a receipt");
+			},
 		});
 		expect(planFailure.details.remoteDelegation).toMatchObject({ effect: "none" });
 	});
@@ -1156,7 +1178,10 @@ describe("remote appliance lifecycle delegation", () => {
 		const callerBefore = cloneState(callerStore.state);
 
 		const plan = await remote.execute({ action: "plan", model: "qwen3.8", gpu: "auto" });
-		expect(plan).toMatchObject({ status: "ok", details: { installable: true, profile: { profile: "linux-docker-local" } } });
+		expect(plan).toMatchObject({
+			status: "ok",
+			details: { installable: true, profile: { profile: "linux-docker-local" } },
+		});
 		expect(remote.store.stateWrites).toBe(0);
 
 		const installed = await remote.execute({ action: "install", model: "qwen3.8", gpu: "auto" });
@@ -1214,7 +1239,14 @@ describe("remote appliance lifecycle delegation", () => {
 			remoteDelegation: { cleanup: "ok", effect: "confirmed" },
 		});
 		const serialized = JSON.stringify(support);
-		for (const forbidden of ["remote-predecessor-secret", "secretRef", "privatePath", "rawLog", "prompt", "modelOutput"]) {
+		for (const forbidden of [
+			"remote-predecessor-secret",
+			"secretRef",
+			"privatePath",
+			"rawLog",
+			"prompt",
+			"modelOutput",
+		]) {
 			expect(serialized).not.toContain(forbidden);
 		}
 	});
@@ -1241,7 +1273,10 @@ describe("remote appliance lifecycle delegation", () => {
 		postStop.store.state = { ...emptyState(), revision: 3, active: predecessor };
 		postStop.platform.failStartCandidate = true;
 		const failedStart = await postStop.execute({ action: "install", model: "qwen3.8", gpu: "auto" });
-		expect(failedStart).toMatchObject({ status: "failed", details: { incumbentPreserved: true, restorationFailed: false } });
+		expect(failedStart).toMatchObject({
+			status: "failed",
+			details: { incumbentPreserved: true, restorationFailed: false },
+		});
 		expect(postStop.store.state.pending?.stage).toBe("before-predecessor-stop");
 		expect(postStop.platform.events).toContain("incumbent:start:predecessor");
 		postStop.platform.failStartCandidate = false;
@@ -1270,7 +1305,12 @@ describe("remote appliance lifecycle delegation", () => {
 		const cleanup = new RemoteLifecycleHarness();
 		const cleanupFailure = await cleanup.execute(
 			{ action: "install", model: "qwen3.8", gpu: "auto" },
-			{ removeOperationRoot: async path => { await rm(path, { recursive: true }); throw new Error("cleanup denied /private/path"); } },
+			{
+				removeOperationRoot: async path => {
+					await rm(path, { recursive: true });
+					throw new Error("cleanup denied /private/path");
+				},
+			},
 		);
 		expect(cleanupFailure).toMatchObject({
 			status: "failed",
@@ -1296,8 +1336,13 @@ describe("remote appliance lifecycle delegation", () => {
 		const request = decodeRemoteApplianceRequest(payload, "install", remote.compatibility.bytes);
 		const failure = await runRemoteApplianceDelegation(request, {
 			platform: "linux",
-			invoke: async () => { throw new Error("delegated install failed"); },
-			removeOperationRoot: async path => { await rm(path, { recursive: true }); throw new Error("cleanup also failed"); },
+			invoke: async () => {
+				throw new Error("delegated install failed");
+			},
+			removeOperationRoot: async path => {
+				await rm(path, { recursive: true });
+				throw new Error("cleanup also failed");
+			},
 		});
 		expect(failure).toMatchObject({
 			status: "failed",

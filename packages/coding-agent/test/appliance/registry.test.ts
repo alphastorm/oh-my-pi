@@ -85,17 +85,21 @@ describe("appliance profile registry", () => {
 			},
 			launch: { executable: "runtime", args: [], secretEnvironmentVariable: "NINFER_API_KEY" },
 		};
-		expect(isProfileInstallable({
-			...preview,
-			availability: { installable: true, channel: "beta", blockers: [] },
-			acceptanceReceipt: undefined,
-		})).toBe(false);
+		expect(
+			isProfileInstallable({
+				...preview,
+				availability: { installable: true, channel: "beta", blockers: [] },
+				acceptanceReceipt: undefined,
+			}),
+		).toBe(false);
 		expect(isProfileInstallable({ ...preview, gpuQualification: undefined })).toBe(false);
 		expect(isProfileInstallable(preview)).toBe(true);
-		expect(isProfileInstallable({
-			...preview,
-			gpuQualification: { ...preview.gpuQualification!, status: "blocked" },
-		})).toBe(false);
+		expect(
+			isProfileInstallable({
+				...preview,
+				gpuQualification: { ...preview.gpuQualification!, status: "blocked" },
+			}),
+		).toBe(false);
 	});
 
 	it("selects supported hardware and explains unsupported hosts", () => {

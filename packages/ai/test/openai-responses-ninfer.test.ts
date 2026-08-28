@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { restoreOpenAIResponsesProviderState, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { NInferCheckpointError, requestNInferCheckpoint } from "@oh-my-pi/pi-ai/providers/ninfer";
+import { restoreOpenAIResponsesProviderState, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type {
 	Context,
 	FetchImpl,

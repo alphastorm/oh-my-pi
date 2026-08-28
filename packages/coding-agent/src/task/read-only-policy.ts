@@ -10,6 +10,10 @@ import type { AgentDefinition } from "./types";
 //
 // `lsp` qualifies because restricted task-agent sessions force `lspReadOnly`,
 // which rejects its mutating actions.
+//
+// The guarantee is repository/worktree read-only. Agent-scoped orchestration and memory
+// tools may persist their own session or memory state; this classification never promises a
+// globally side-effect-free process.
 export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"read",
 	"grep",

@@ -200,6 +200,27 @@ describe("ast_grep parse errors", () => {
 		}
 	});
 
+	it("resolves an explicit CUDA header language alias", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-cuh-alias-"));
+		try {
+			const filePath = path.join(tempDir, "kernel.cuh");
+			await Bun.write(filePath, "int cuda_value() { return 42; }\n");
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
+			const tool = tools.find(entry => entry.name === "ast_grep");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-grep-cuh-alias", {
+				pat: "return $VALUE;",
+				path: filePath,
+				lang: "cuh",
+			});
+			const details = result.details as { matchCount?: number } | undefined;
+			expect(details?.matchCount).toBe(1);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("honors an explicit C++ language for ambiguous headers", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-cpp-header-"));
 		try {

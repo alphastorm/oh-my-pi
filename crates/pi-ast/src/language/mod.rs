@@ -684,6 +684,7 @@ static LANG_ALIASES: phf::Map<&'static str, SupportLang> = phf_map! {
 "hh"             => SupportLang::Cpp,
 "hpp"            => SupportLang::Cpp,
 "cu"             => SupportLang::Cpp,
+"cuh"            => SupportLang::Cpp,
 "ino"            => SupportLang::Cpp,
 "csharp"         => SupportLang::CSharp,
 "c#"             => SupportLang::CSharp,

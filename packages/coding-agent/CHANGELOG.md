@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Interactive and print sessions now announce an OAuth account the auth layer signed out automatically — as a warning notice when it happens, and again at startup until that account signs in again — instead of silently degrading to a sibling account; `omp usage` shares the same sign-out predicate and wording.
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

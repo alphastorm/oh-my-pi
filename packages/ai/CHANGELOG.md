@@ -5,6 +5,7 @@
 ### Fixed
 
 - Automatic OAuth credential disables (definitive refresh failure, upstream token invalidation, broker disable) now log the provider, credential id, account, and cause, and `credential_disabled` events carry the credential id and account identity ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- Fixed automatic OAuth credential disables through the auth broker and local invalidated-token rotation removing credentials refreshed by a peer; disables now compare the failed credential before removing the row.
 
 ## [18.1.19] - 2026-09-12
 

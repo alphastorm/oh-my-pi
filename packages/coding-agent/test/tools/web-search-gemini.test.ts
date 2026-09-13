@@ -3,6 +3,7 @@ import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { serializeCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { GeminiProvider, searchGemini } from "@oh-my-pi/pi-coding-agent/web/search/providers/gemini";
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 
 const SSE_RESPONSE =
 	'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Gemini answer"}]}}],"modelVersion":"gemini-2.5-flash"}}\n\n';
@@ -88,6 +89,52 @@ describe("searchGemini tools serialization", () => {
 			systemPrompt: "Gemini test prompt",
 		} as const;
 	}
+
+	it.each(["google-antigravity", "google-gemini-cli"] as const)(
+		"serializes %s search without requestType while preserving prompts and tools",
+		async provider => {
+			const systemPrompt = "<system-conventions>Keep the full search instructions.</system-conventions>";
+			const authStorage = {
+				async getOAuthAccess(candidate: string) {
+					return candidate === provider
+						? { accessToken: "test-access-token", projectId: "test-project" }
+						: undefined;
+				},
+			} as unknown as AuthStorage;
+			const result = await searchGemini({
+				...makeParams("full search query"),
+				system_prompt: systemPrompt,
+				authStorage,
+				google_search: { dynamicRetrievalConfig: { mode: "MODE_DYNAMIC" } },
+				code_execution: {},
+				url_context: { allowedDomains: ["example.com"] },
+				max_output_tokens: 2048,
+				temperature: 0.2,
+				fetch: mockGeminiFetch(),
+			});
+
+			expect(result.answer).toBe("Gemini answer");
+			expect(capturedRequest?.body).not.toHaveProperty("requestType");
+			expect(capturedRequest?.body).toMatchObject({
+				project: "test-project",
+				userAgent: provider === "google-antigravity" ? "antigravity" : USER_AGENT,
+			});
+			expect(capturedRequest?.body?.requestId).toMatch(provider === "google-antigravity" ? /^agent-/ : /^omp-/);
+			expect(capturedRequest?.body?.request).toEqual({
+				contents: [{ role: "user", parts: [{ text: "full search query" }] }],
+				systemInstruction: {
+					...(provider === "google-antigravity" ? { role: "user" } : {}),
+					parts: [{ text: systemPrompt }],
+				},
+				tools: [
+					{ googleSearch: { dynamicRetrievalConfig: { mode: "MODE_DYNAMIC" } } },
+					{ codeExecution: {} },
+					{ urlContext: { allowedDomains: ["example.com"] } },
+				],
+				generationConfig: { maxOutputTokens: 2048, temperature: 0.2 },
+			});
+		},
+	);
 
 	it("treats a standard Google developer API key as available", () => {
 		const provider = new GeminiProvider();

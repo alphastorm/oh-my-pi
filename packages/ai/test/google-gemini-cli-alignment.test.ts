@@ -261,7 +261,7 @@ describe("Google Gemini CLI alignment", () => {
 		};
 
 		expect(payload.request.sessionId).toMatch(/^-[0-9]+$/);
-		expect(payload.requestType).toBe("agent");
+		expect(payload).not.toHaveProperty("requestType");
 		expect(payload.userAgent).toBe("antigravity");
 		// Structured requestId: agent/<agentId>/<ts>/<trajectoryId>/<step>.
 		expect(payload.requestId).toMatch(/^agent\/[0-9a-f-]+\/\d+\/[0-9a-f-]+\/\d+$/);
@@ -273,6 +273,70 @@ describe("Google Gemini CLI alignment", () => {
 		expect(labels?.used_claude).toBe("false");
 		expect(labels?.used_claude_conservative).toBe("false");
 	});
+
+	it.each(["google-antigravity", "google-gemini-cli"] as const)(
+		"serializes %s chat without requestType while preserving prompts and tools",
+		async provider => {
+			const model = createModel(provider);
+			const systemPrompt = [
+				"<system-conventions>Keep all instructions.</system-conventions>",
+				"Use the available tools.",
+			];
+			const parameters = { type: "object", properties: { command: { type: "string" } }, required: ["command"] };
+			let body: ReturnType<typeof buildRequest> | undefined;
+			const fetchMock: FetchImpl = async (_url, init) => {
+				body = JSON.parse(String(init?.body));
+				return new Response(
+					'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}]}}\n\n',
+					{ headers: { "Content-Type": "text/event-stream" } },
+				);
+			};
+			const result = await streamGoogleGeminiCli(
+				model,
+				{
+					...createContext(),
+					systemPrompt,
+					tools: [{ name: "run_command", description: "Run the full command unchanged.", parameters }],
+				},
+				{ apiKey: JSON.stringify({ token: "test-token", projectId: "proj-123" }), fetch: fetchMock },
+			).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(body).not.toHaveProperty("requestType");
+			expect(body).toMatchObject({ project: "proj-123", model: model.id });
+			expect(body?.request.contents).toEqual([{ role: "user", parts: [{ text: "implement token refresh" }] }]);
+			expect(body?.request.systemInstruction).toEqual({
+				...(provider === "google-antigravity" ? { role: "user" } : {}),
+				parts: systemPrompt.map(text => ({ text })),
+			});
+			expect(body?.request.tools).toEqual([
+				{
+					functionDeclarations: [
+						{
+							name: "run_command",
+							description: "Run the full command unchanged.",
+							[provider === "google-antigravity" ? "parameters" : "parametersJsonSchema"]: {
+								type: "object",
+								properties: { command: { type: "string" } },
+								required: ["command"],
+							},
+						},
+					],
+				},
+			]);
+			if (provider === "google-antigravity") {
+				expect(body?.userAgent).toBe("antigravity");
+				expect(body?.requestId).toMatch(/^agent\/[0-9a-f-]+\/\d+\/[0-9a-f-]+\/\d+$/);
+				expect(body?.request.sessionId).toMatch(/^-[0-9]+$/);
+				expect(body?.request.labels).toMatchObject({ used_claude: "false", used_claude_conservative: "false" });
+			} else {
+				expect(body).not.toHaveProperty("userAgent");
+				expect(body).not.toHaveProperty("requestId");
+				expect(body?.request).not.toHaveProperty("sessionId");
+				expect(body?.request).not.toHaveProperty("labels");
+			}
+		},
+	);
 
 	it("stamps the antigravity wire profile (maxOutputTokens + model_enum) by routed wire id", () => {
 		const model = createModel("google-antigravity");

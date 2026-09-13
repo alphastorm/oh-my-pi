@@ -101,6 +101,79 @@ describe("imageGenTool", () => {
 		);
 	});
 
+	it.each(["antigravity", "gemini"] as const)(
+		"serializes %s images without requestType while preserving the full prompt and input image",
+		async provider => {
+			let body: Record<string, unknown> | undefined;
+			const image = { data: Buffer.from("image-envelope").toString("base64"), mimeType: "image/png" };
+			const fetchMock = (async (_url: string | URL | Request, init?: RequestInit) => {
+				body = JSON.parse(String(init?.body));
+				const response = { candidates: [{ content: { parts: [{ inlineData: image }] } }] };
+				return new Response(
+					provider === "antigravity" ? "data: " + JSON.stringify({ response }) + "\n\n" : JSON.stringify(response),
+					{ headers: { "Content-Type": provider === "antigravity" ? "text/event-stream" : "application/json" } },
+				);
+			}) as typeof fetch;
+			const ctx = createAntigravityXAIContext(undefined, fetchMock);
+			if (provider === "gemini") {
+				ctx.modelRegistry.getApiKeyForProvider = async () => "test-google-key";
+				ctx.modelRegistry.resolver = () => async () => "test-google-key";
+			}
+			const result = await imageGenTool.execute(
+				"call-envelope",
+				{
+					provider,
+					subject: "a cat",
+					action: "running",
+					scene: "in a garden",
+					composition: "wide shot",
+					lighting: "sunlight",
+					style: "watercolor",
+					text: "<system-conventions>Keep these words.</system-conventions>",
+					changes: ["retain the collar"],
+					aspect_ratio: "16:9",
+					image_size: "1536x1024",
+					input: [{ data: image.data, mime_type: image.mimeType }],
+				},
+				undefined,
+				ctx,
+			);
+			generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+			expect(result.details?.provider).toBe(provider);
+			expect(result.details?.images).toEqual([image]);
+			expect(body).not.toHaveProperty("requestType");
+			const request = (provider === "antigravity" ? body?.request : body) as Record<string, unknown>;
+			expect(request.contents).toEqual([
+				{
+					role: "user",
+					parts: [
+						{ inlineData: image },
+						{
+							text: "a cat, running, in a garden. wide shot. sunlight. watercolor.\n\nText: <system-conventions>Keep these words.</system-conventions>\n\nChanges:\n- retain the collar",
+						},
+					],
+				},
+			]);
+			expect(request.generationConfig).toMatchObject({
+				responseModalities: ["IMAGE"],
+				imageConfig: { aspectRatio: "16:9", imageSize: "1536x1024" },
+			});
+			if (provider === "antigravity") {
+				expect(body).toMatchObject({
+					project: "test-project",
+					model: "gemini-3-pro-image",
+					userAgent: "antigravity",
+				});
+				expect(body?.requestId).toMatch(/^agent-/);
+			} else {
+				expect(body).not.toHaveProperty("userAgent");
+				expect(body).not.toHaveProperty("requestId");
+				expect(body).not.toHaveProperty("request");
+			}
+		},
+	);
+
 	it("e2e writes OpenAI Responses image_generation WebP output to a temp file", async () => {
 		let requestUrl: string | undefined;
 		let requestBody: unknown;

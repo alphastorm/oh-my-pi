@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- An authoritative model discovery that no longer advertises a model the previous catalog carried now logs a warning naming the dropped ids, instead of letting the model silently vanish from the picker (the visible symptom when the account holding an entitlement was signed out).
+- Model discovery now logs a warning naming the models an authoritative catalog dropped since the last refresh, instead of letting them vanish from the picker silently ([#11913](https://github.com/can1357/oh-my-pi/pull/11913) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.1.19] - 2026-09-12
 

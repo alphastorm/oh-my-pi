@@ -49,6 +49,12 @@ describe("beam helper ids, weights, and metadata", () => {
 });
 
 describe("beam lexical and FTS helpers", () => {
+	it("does not treat identifier or word substrings as lexical evidence", () => {
+		expect(lexicalRelevance(["1password"], "The gates pass.", "1password")).toBe(0);
+		expect(lexicalRelevance(["redis"], "A predisposition to word games.", "redis")).toBe(0);
+		expect(strictFactMatches("redis", "A predisposition to word games.")).toBe(false);
+	});
+
 	it("builds stopword-filtered FTS terms with query-side synonyms", () => {
 		expect(recallTokens("What is my branding preference for the professional URL? 123")).toEqual([
 			"branding",

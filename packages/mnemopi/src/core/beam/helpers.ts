@@ -212,18 +212,9 @@ export function lexicalRelevance(queryTokens: readonly string[], content: string
 			partial += 0.75;
 			continue;
 		}
-		if (
-			token.length >= 4 &&
-			Array.from(contentTokens).some(
-				contentToken => contentToken.length >= 4 && (token.includes(contentToken) || contentToken.includes(token)),
-			)
-		) {
-			partial += 0.4;
-		}
 	}
 
-	const fullMatch = queryLower !== "" && contentLower.includes(queryLower) ? 1 : 0;
-	let score = (exact + partial + fullMatch) / Math.max(queryTokens.length, 1);
+	let score = (exact + partial) / Math.max(queryTokens.length, 1);
 	if (score === 0 && queryCjk.size > 0) {
 		const contentCjk = new Set(Array.from(contentLower).filter(isCjkChar));
 		let overlap = 0;
@@ -237,7 +228,7 @@ export function strictFactMatches(query: string, factText: string): boolean {
 	const queryLower = query.toLowerCase().trim();
 	const factLower = factText.toLowerCase().trim();
 	if (!queryLower || !factLower) return false;
-	if (factLower.includes(queryLower)) return true;
+	if (factLower === queryLower) return true;
 	const queryTokens = factMatchTokens(queryLower);
 	const factTokens = factMatchTokens(factLower);
 	if (queryTokens.size === 0 || factTokens.size === 0) return false;

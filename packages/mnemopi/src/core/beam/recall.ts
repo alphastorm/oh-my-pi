@@ -1,8 +1,9 @@
 import { normalizedRecallWeights, temporalHalflifeHours } from "../../config";
+import { hasCjk } from "../../util/regex";
 import { embedQuery } from "../embeddings";
 import { mmrRerank } from "../mmr";
 import { adjustWeights, classifyIntent } from "../query-intent";
-import { getSynonyms, normalizeQuery, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
+import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
 import { cosineSimilarity } from "../vector-math";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
@@ -184,7 +185,7 @@ function clamp01(value: number): number {
 
 function tokenize(text: string): string[] {
 	const lowered = text.toLowerCase();
-	const matches = lowered.match(/[\p{L}\p{N}_]+/gu) ?? [];
+	const matches = lowered.match(/[\p{L}\p{N}]+/gu) ?? [];
 	const tokens: string[] = [];
 	for (const token of matches) {
 		if (token.length === 0 || STOP_WORDS.has(token)) continue;
@@ -251,79 +252,25 @@ function factExpandedTokenGroups(query: string, content: string): string[][] {
 	return groups;
 }
 
-function tokensFromGroups(groups: readonly (readonly string[])[]): string[] {
-	const seen = new Set<string>();
-	for (const group of groups) {
-		for (const token of group) seen.add(token);
-	}
-	return [...seen];
-}
+// Require token boundaries, except for CJK text which need not separate words with spaces.
 
-function contentMatchesToken(contentLower: string, contentTokens: ReadonlySet<string>, token: string): boolean {
-	if (contentTokens.has(token) || contentLower.includes(token)) return true;
-	for (const contentToken of contentTokens) {
-		if (
-			contentToken.length >= 4 &&
-			token.length >= 4 &&
-			(contentToken.includes(token) || token.includes(contentToken))
-		) {
-			return true;
-		}
-	}
-	return false;
-}
-
-function lexicalGroupRelevance(
-	queryGroups: readonly (readonly string[])[],
-	content: string,
-	normalizedQuery: string,
-): number {
+function lexicalGroupRelevance(queryGroups: readonly (readonly string[])[], content: string): number {
 	if (queryGroups.length === 0) return 0;
-	const contentLower = content.toLowerCase();
-	if (queryGroups.length > 1 && normalizedQuery.length > 0 && contentLower.includes(normalizedQuery)) return 1;
-	const contentTokens = new Set(tokenize(contentLower));
-	let exact = 0;
-	let partial = 0;
+	const tokens = tokenize(content);
+	const contentTokens = new Set(tokens);
+	const cjkContent = queryGroups.some(group => group.some(hasCjk)) ? content.toLowerCase() : null;
+	let matched = 0;
 	for (const group of queryGroups) {
-		let matched = false;
-		for (const token of group) {
-			if (contentMatchesToken(contentLower, contentTokens, token)) {
-				matched = true;
-				break;
-			}
-		}
-		if (matched) exact += 1;
-		else {
-			for (const token of group) {
-				for (const contentToken of contentTokens) {
-					if (
-						contentToken.length >= 4 &&
-						token.length >= 4 &&
-						(contentToken.includes(token) || token.includes(contentToken))
-					) {
-						partial += 1;
-						matched = true;
-						break;
-					}
-				}
-				if (matched) break;
-			}
-		}
+		if (group.some(token => contentTokens.has(token) || (hasCjk(token) && cjkContent?.includes(token)))) matched += 1;
 	}
-	if (queryGroups.length === 1) {
-		if (exact === 0 && partial === 0) return 0;
-		const token = queryGroups[0]?.[0] ?? "";
-		let count = 0;
-		let offset = 0;
-		while (token.length > 0) {
-			const idx = contentLower.indexOf(token, offset);
-			if (idx < 0) break;
-			count += 1;
-			offset = idx + token.length;
-		}
-		return clamp01(0.7 + Math.min(Math.max(count - 1, 0), 3) * 0.1);
+	if (queryGroups.length !== 1) return matched / queryGroups.length;
+	if (matched === 0) return 0;
+	const token = queryGroups[0]?.[0];
+	let count = 0;
+	for (const contentToken of tokens) {
+		if (contentToken === token) count += 1;
 	}
-	return clamp01((exact + partial * 0.5) / queryGroups.length);
+	return clamp01(0.7 + Math.min(Math.max(count - 1, 0), 3) * 0.1);
 }
 
 function queryAsksCurrent(query: string): boolean {
@@ -344,45 +291,6 @@ function minimumRelevance(tokens: readonly string[]): number {
 	if (tokens.length === 2) return 0.18;
 	if (tokens.length === 3) return 0.34;
 	return 0.22;
-}
-
-function lexicalRelevance(queryTokens: readonly string[], content: string, normalizedQuery: string): number {
-	if (queryTokens.length === 0) return 0;
-	const contentLower = content.toLowerCase();
-	if (queryTokens.length > 1 && normalizedQuery.length > 0 && contentLower.includes(normalizedQuery)) return 1;
-	if (queryTokens.length === 1) {
-		const token = queryTokens[0] ?? "";
-		if (token.length === 0 || !contentLower.includes(token)) return 0;
-		let count = 0;
-		let offset = 0;
-		while (true) {
-			const idx = contentLower.indexOf(token, offset);
-			if (idx < 0) break;
-			count += 1;
-			offset = idx + token.length;
-		}
-		return clamp01(0.7 + Math.min(Math.max(count - 1, 0), 3) * 0.1);
-	}
-	const contentTokens = new Set(tokenize(contentLower));
-	let exact = 0;
-	let partial = 0;
-	for (const token of queryTokens) {
-		if (contentTokens.has(token) || contentLower.includes(token)) {
-			exact += 1;
-			continue;
-		}
-		for (const contentToken of contentTokens) {
-			if (
-				contentToken.length >= 4 &&
-				token.length >= 4 &&
-				(contentToken.includes(token) || token.includes(contentToken))
-			) {
-				partial += 1;
-				break;
-			}
-		}
-	}
-	return clamp01((exact + partial * 0.5) / queryTokens.length);
 }
 
 function recencyDecay(timestamp: unknown, halfLifeHours = 72): number {
@@ -723,16 +631,12 @@ function scoreCandidate(
 	candidate: MemoryCandidate,
 	queryTokens: readonly string[],
 	queryGroups: readonly (readonly string[])[],
-	normalizedQueryLower: string,
 	weights: readonly [number, number, number],
 	options: RecallOptionsInternal,
 ): RecallResult | null {
 	const content = asString(candidate.row.content);
 	const searchableContent = asString(candidate.row.embed_text) || content;
-	const lexical =
-		queryGroups.length > 0
-			? lexicalGroupRelevance(queryGroups, searchableContent, normalizedQueryLower)
-			: lexicalRelevance(queryTokens, searchableContent, normalizedQueryLower);
+	const lexical = lexicalGroupRelevance(queryGroups, searchableContent);
 	const minRel = minimumRelevance(queryTokens);
 	if (lexical < minRel && candidate.signals.dense < 0.65) return null;
 	const [vecWeight, ftsWeight, importanceWeight] = weights;
@@ -993,11 +897,10 @@ export async function recall(
 	const useSynonyms = options.useSynonyms !== false;
 	const tokens = expandedTokens(query, useSynonyms);
 	const tokenGroups = expandedTokenGroups(query, useSynonyms);
-	const normalized = normalizeQuery(query).toLowerCase();
 	const candidates = collectMemoryCandidates(beam, query, topK, temporalOptions);
 	const scored: RecallResult[] = [];
 	for (const candidate of candidates) {
-		const result = scoreCandidate(candidate, tokens, tokenGroups, normalized, weights, temporalOptions);
+		const result = scoreCandidate(candidate, tokens, tokenGroups, weights, temporalOptions);
 		if (result !== null) scored.push(result);
 	}
 	scored.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
@@ -1184,7 +1087,6 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 	if (rowids.length === 0) return [];
 	const visibility = factVisibilityWhere(beam, "");
 	const ranks = normalizeRanks(matched, "rowid");
-	const normalized = normalizeQuery(query).toLowerCase();
 	const rows = queryAll(
 		beam,
 		`SELECT rowid, fact_id, subject, predicate, object, timestamp, confidence
@@ -1203,11 +1105,7 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 			const content = object.length > 0 ? object : `${subject} ${predicate}`.trim();
 			const searchable = factSearchableText(subject, predicate, object);
 			const queryGroups = factExpandedTokenGroups(query, searchable);
-			const queryTokens = tokensFromGroups(queryGroups);
-			const lexical =
-				queryGroups.length > 0
-					? lexicalGroupRelevance(queryGroups, searchable, normalized)
-					: lexicalRelevance(queryTokens, searchable, normalized);
+			const lexical = lexicalGroupRelevance(queryGroups, searchable);
 			const rank = ranks.get(asNumber(row.rowid)) ?? 0;
 			const result: FactRecallResult = {
 				id: asString(row.fact_id),

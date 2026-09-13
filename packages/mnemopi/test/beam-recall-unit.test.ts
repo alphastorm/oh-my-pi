@@ -86,6 +86,65 @@ function insertEpisodic(
 }
 
 describe("beam recall free functions", () => {
+	it("does not crowd an older shared identifier out with recent substring-only project hits", async () => {
+		const shared = makeBeam();
+		const project = makeBeam();
+		insertWorking(shared, "account-rule", "Use the personal 1Password account for credentials.", {
+			timestamp: "2026-05-23T12:00:00.000Z",
+			importance: 0.75,
+		});
+		shared.db.run("UPDATE working_memory SET veracity = 'tool' WHERE id = 'account-rule'");
+		insertWorking(project, "gate-status", "The qualification gates pass with green checks.", { importance: 0.75 });
+		insertWorking(project, "word-choice", "Keep the word concise in the summary.", { importance: 0.75 });
+		for (const [beam, ids] of [
+			[shared, ["account-rule"]],
+			[project, ["gate-status", "word-choice"]],
+		] as const) {
+			for (const id of ids) {
+				beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'fixture')", [
+					id,
+					JSON.stringify([0.5, Math.sqrt(0.75)]),
+				]);
+			}
+		}
+		const options = { queryEmbedding: [1, 0], queryTime: "2026-05-30T12:00:00.000Z", updateRecallCounts: false };
+		const sharedHits = await recallEnhanced(shared, "1Password", 2, options);
+		const projectHits = await recallEnhanced(project, "1Password", 2, options);
+		const merged = [...sharedHits, ...projectHits].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 2);
+		expect(merged.map(result => result.id)).toEqual(["account-rule"]);
+	});
+
+	it("rejects substring-only lexical matches in either direction and across phrase boundaries", async () => {
+		const beam = makeBeam();
+		insertWorking(beam, "substring", "A predisposition to word games about bobcat dogma.");
+		for (const query of ["redis", "password", "cat dog"]) {
+			expect(await recall(beam, query, 5, { queryEmbedding: null })).toEqual([]);
+		}
+		beam.db.run(
+			"INSERT INTO facts (fact_id, session_id, subject, predicate, object, confidence) VALUES ('noise', 's1', 'entity', 'fact', 'A predisposition to word games.', 1)",
+		);
+		expect(factRecall(beam, "redis", 5)).toEqual([]);
+	});
+
+	it("preserves synonym and semantic-only recall without substring lexical evidence", async () => {
+		const beam = makeBeam();
+		insertWorking(beam, "synonym", "The datastore retains customer records.");
+		expect((await recall(beam, "database", 5, { queryEmbedding: null })).map(result => result.id)).toContain(
+			"synonym",
+		);
+		insertWorking(beam, "identifier", "telemetry_api_latency_ms stays below the threshold.");
+		expect((await recall(beam, "telemetry latency", 5, { queryEmbedding: null })).map(result => result.id)).toEqual([
+			"identifier",
+		]);
+		insertWorking(beam, "semantic", "The vault selects the personal login.");
+		beam.db.run(
+			"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES ('semantic', '[1,0]', 'fixture')",
+		);
+		expect((await recall(beam, "1Password", 5, { queryEmbedding: [1, 0] })).map(result => result.id)).toEqual([
+			"semantic",
+		]);
+	});
+
 	it("orders deterministic FTS-only working-memory hits by lexical strength", async () => {
 		const beam = makeBeam();
 		insertWorking(beam, "wm-weak", "banana appears once beside unrelated notes");
@@ -193,7 +252,7 @@ describe("beam recall free functions", () => {
 
 	it("handles CJK token queries without embeddings", async () => {
 		const beam = makeBeam();
-		insertWorking(beam, "wm-cjk", "数据库 密码 已轮换");
+		insertWorking(beam, "wm-cjk", "数据库密码已轮换");
 		insertWorking(beam, "wm-other", "unrelated english note");
 
 		const results = await recall(beam, "数据库", 3);

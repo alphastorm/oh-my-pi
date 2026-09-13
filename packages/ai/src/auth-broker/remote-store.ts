@@ -8,7 +8,7 @@
  * runs isn't required.
  */
 import * as os from "node:os";
-import { getAppName, getInstallId, logger } from "@oh-my-pi/pi-utils";
+import { getAppName, getInstallId, logger, redactSecrets, redactUrlSecrets } from "@oh-my-pi/pi-utils";
 import { serializeCredential } from "../auth/sqlite-credential-store";
 import {
 	type AuthCredential,
@@ -714,7 +714,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#removeCredentialById(id);
 		// Fire-and-forget: tell the broker to persist the disable.
 		this.#client.disableCredential(id, disabledCause).catch(error => {
-			logger.warn("auth-broker disable propagation failed", { id, error: String(error) });
+			logger.warn("auth-broker disable propagation failed", { id, error: redactSecrets(String(error)) });
 		});
 	}
 
@@ -759,7 +759,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		try {
 			await this.refreshSnapshot();
 		} catch (error) {
-			logger.debug("auth-broker snapshot refresh after rejected disable failed", { error: String(error) });
+
+			logger.debug("auth-broker snapshot refresh after rejected disable failed", {
+				error: redactSecrets(String(error)),
+			});
 		}
 	}
 
@@ -782,7 +785,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				void this.#reconcileAfterRejectedDisable();
 				return;
 			}
-			logger.warn("auth-broker disable propagation failed", { id, error: String(error) });
+			logger.warn("auth-broker disable propagation failed", { id, error: redactSecrets(String(error)) });
 		});
 		return true;
 	}
@@ -870,9 +873,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				await this.#client.disableCredential(entry.id, "replaced by newer credential");
 			} catch (error) {
 				logger.warn("auth-broker disable during replace failed", {
-					provider,
+					provider: redactUrlSecrets(provider),
 					id: entry.id,
-					error: String(error),
+					error: redactSecrets(String(error)),
 				});
 			}
 		}
@@ -899,9 +902,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				await this.#client.disableCredential(entry.id, disabledCause);
 			} catch (error) {
 				logger.warn("auth-broker disable during delete failed", {
-					provider,
+					provider: redactUrlSecrets(provider),
 					id: entry.id,
-					error: String(error),
+					error: redactSecrets(String(error)),
 				});
 			}
 		}

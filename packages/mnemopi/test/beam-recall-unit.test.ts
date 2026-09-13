@@ -126,6 +126,33 @@ describe("beam recall free functions", () => {
 		expect(factRecall(beam, "redis", 5)).toEqual([]);
 	});
 
+	it("keeps compound synonym aliases and queried identifiers intact", async () => {
+		const beam = makeBeam();
+		insertWorking(beam, "generic-data", "Raw data is retained for the audit.");
+		insertWorking(beam, "generic-build", "The build succeeded.");
+		expect(await recall(beam, "database", 5, { queryEmbedding: null })).toEqual([]);
+		expect(await recall(beam, "build_id", 5, { queryEmbedding: null })).toEqual([]);
+		insertWorking(beam, "compound-alias", "The data_store persists records.");
+		insertWorking(beam, "compound-id", "The build_id is recorded.");
+		expect((await recall(beam, "database", 5, { queryEmbedding: null })).map(result => result.id)).toEqual([
+			"compound-alias",
+		]);
+		expect((await recall(beam, "build_id", 5, { queryEmbedding: null })).map(result => result.id)).toEqual([
+			"compound-id",
+		]);
+	});
+
+	it("retains forward word prefixes without matching shorter or interior fragments", async () => {
+		const beam = makeBeam();
+		insertWorking(beam, "backups", "Nightly backups run at 03:00.");
+		insertWorking(beam, "deployed", "The service was deployed yesterday.");
+		insertWorking(beam, "short-fragment", "We will be back tomorrow.");
+		expect((await recall(beam, "backup", 5, { queryEmbedding: null })).map(result => result.id)).toEqual(["backups"]);
+		expect((await recall(beam, "deploy", 5, { queryEmbedding: null })).map(result => result.id)).toEqual([
+			"deployed",
+		]);
+	});
+
 	it("preserves synonym and semantic-only recall without substring lexical evidence", async () => {
 		const beam = makeBeam();
 		insertWorking(beam, "synonym", "The datastore retains customer records.");
@@ -259,6 +286,22 @@ describe("beam recall free functions", () => {
 
 		expect(results[0]?.id).toBe("wm-cjk");
 		expect(results.map(result => result.id)).not.toContain("wm-other");
+	});
+
+	it("preserves lexical-strength ordering for repeated spaceless CJK words", async () => {
+		const beam = makeBeam();
+		insertWorking(beam, "cjk-once", "数据库密码已轮换");
+		insertWorking(beam, "cjk-repeat", "数据库数据库数据库数据库密码");
+		const results = await recall(beam, "数据库", 5, {
+			queryEmbedding: null,
+			queryTime: "2026-05-30T12:00:00.000Z",
+			vecWeight: 1,
+			ftsWeight: 0,
+			importanceWeight: 0,
+		});
+		expect(results.find(result => result.id === "cjk-repeat")?.score ?? 0).toBeGreaterThan(
+			results.find(result => result.id === "cjk-once")?.score ?? 1,
+		);
 	});
 
 	it("does not retry scoped recall without the session filter when only another session matches", async () => {

@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed unrelated memories crowding out exact identifier matches by requiring lexical token boundaries instead of arbitrary substrings, while preserving synonyms, identifier components, CJK text, and semantic recall.
+- Fixed unrelated memories crowding out exact identifier matches by anchoring lexical matches to whole tokens or forward prefixes instead of interior or reverse substrings, while preserving compound synonyms, identifier components, CJK frequency scoring, and semantic recall.
 
 ## [18.0.11] - 2026-08-29
 

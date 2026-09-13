@@ -31,6 +31,12 @@ memory.close();
 
 ## Configuration
 
+Lexical scoring uses whole tokens, declared synonyms, and weaker forward prefixes of at least
+four characters. A query for `backup` can match `backups`, but `1Password` does not match
+`pass` or `word`. Underscore-separated document identifiers expose searchable components
+without splitting query identifiers or compound synonym aliases. Spaceless CJK matching
+and optional semantic-vector retrieval are retained; prefix matching is not a stemmer.
+
 `Mnemopi` accepts LLM and embedding options directly. `MNEMOPI_*` environment variables remain fallbacks/defaults when the matching constructor option is omitted.
 
 ```ts

@@ -79,6 +79,11 @@ export function hasCjk(text: string): boolean {
 
 export const containsSpacelessCjk = hasCjk;
 
+/** Allow a meaningful leading query fragment, never an interior or reverse substring. */
+export function matchesRecallPrefix(queryToken: string, contentToken: string): boolean {
+	return queryToken.length >= 4 && contentToken.length > queryToken.length && contentToken.startsWith(queryToken);
+}
+
 export function recallTokens(text: string): string[] {
 	RECALL_TOKEN_RE.lastIndex = 0;
 	const tokens: string[] = [];

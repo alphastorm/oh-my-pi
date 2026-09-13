@@ -1,5 +1,5 @@
 import { normalizedRecallWeights, temporalHalflifeHours } from "../../config";
-import { hasCjk } from "../../util/regex";
+import { hasCjk, matchesRecallPrefix } from "../../util/regex";
 import { embedQuery } from "../embeddings";
 import { mmrRerank } from "../mmr";
 import { adjustWeights, classifyIntent } from "../query-intent";
@@ -185,7 +185,7 @@ function clamp01(value: number): number {
 
 function tokenize(text: string): string[] {
 	const lowered = text.toLowerCase();
-	const matches = lowered.match(/[\p{L}\p{N}]+/gu) ?? [];
+	const matches = lowered.match(/[\p{L}\p{N}_]+/gu) ?? [];
 	const tokens: string[] = [];
 	for (const token of matches) {
 		if (token.length === 0 || STOP_WORDS.has(token)) continue;
@@ -252,23 +252,51 @@ function factExpandedTokenGroups(query: string, content: string): string[][] {
 	return groups;
 }
 
-// Require token boundaries, except for CJK text which need not separate words with spaces.
-
+// Match whole tokens or forward prefixes; CJK text need not separate words with spaces.
 function lexicalGroupRelevance(queryGroups: readonly (readonly string[])[], content: string): number {
 	if (queryGroups.length === 0) return 0;
 	const tokens = tokenize(content);
 	const contentTokens = new Set(tokens);
+	// Split document identifiers only; a query synonym such as data_store must stay atomic.
+	for (const token of tokens) {
+		if (!token.includes("_")) continue;
+		for (const part of token.split("_")) {
+			if (part.length > 0) contentTokens.add(part);
+		}
+	}
 	const cjkContent = queryGroups.some(group => group.some(hasCjk)) ? content.toLowerCase() : null;
 	let matched = 0;
+	let partial = 0;
 	for (const group of queryGroups) {
-		if (group.some(token => contentTokens.has(token) || (hasCjk(token) && cjkContent?.includes(token)))) matched += 1;
+		if (group.some(token => contentTokens.has(token) || (hasCjk(token) && cjkContent?.includes(token)))) {
+			matched += 1;
+		} else if (
+			group.some(token => {
+				for (const contentToken of contentTokens) {
+					if (matchesRecallPrefix(token, contentToken)) return true;
+				}
+				return false;
+			})
+		) {
+			partial += 1;
+		}
 	}
-	if (queryGroups.length !== 1) return matched / queryGroups.length;
-	if (matched === 0) return 0;
+	if (queryGroups.length !== 1) return (matched + partial * 0.5) / queryGroups.length;
+	if (matched === 0) return partial > 0 ? 0.35 : 0;
 	const token = queryGroups[0]?.[0];
 	let count = 0;
-	for (const contentToken of tokens) {
-		if (contentToken === token) count += 1;
+	if (token && hasCjk(token) && cjkContent !== null) {
+		for (
+			let offset = cjkContent.indexOf(token);
+			offset >= 0;
+			offset = cjkContent.indexOf(token, offset + token.length)
+		) {
+			count += 1;
+		}
+	} else {
+		for (const contentToken of tokens) {
+			if (contentToken === token) count += 1;
+		}
 	}
 	return clamp01(0.7 + Math.min(Math.max(count - 1, 0), 3) * 0.1);
 }

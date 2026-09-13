@@ -9,6 +9,7 @@ import {
 	ftsQueryTerms,
 	hasCjk,
 	isCjkChar,
+	matchesRecallPrefix,
 	RECALL_SYNONYMS,
 	recallTokens,
 } from "../../util/regex";
@@ -212,6 +213,12 @@ export function lexicalRelevance(queryTokens: readonly string[], content: string
 			partial += 0.75;
 			continue;
 		}
+		for (const contentToken of contentTokens) {
+			if (matchesRecallPrefix(token, contentToken)) {
+				partial += 0.4;
+				break;
+			}
+		}
 	}
 
 	let score = (exact + partial) / Math.max(queryTokens.length, 1);
@@ -232,7 +239,13 @@ export function strictFactMatches(query: string, factText: string): boolean {
 	const queryTokens = factMatchTokens(queryLower);
 	const factTokens = factMatchTokens(factLower);
 	if (queryTokens.size === 0 || factTokens.size === 0) return false;
-	const overlap = Array.from(queryTokens).filter(token => factTokens.has(token));
+	const overlap = Array.from(queryTokens).filter(token => {
+		if (factTokens.has(token)) return true;
+		for (const factToken of factTokens) {
+			if (matchesRecallPrefix(token, factToken)) return true;
+		}
+		return false;
+	});
 	if (overlap.length >= 2) return true;
 	const token = overlap[0];
 	if (token === undefined) return false;

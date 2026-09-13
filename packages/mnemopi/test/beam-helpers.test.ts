@@ -53,6 +53,9 @@ describe("beam lexical and FTS helpers", () => {
 		expect(lexicalRelevance(["1password"], "The gates pass.", "1password")).toBe(0);
 		expect(lexicalRelevance(["redis"], "A predisposition to word games.", "redis")).toBe(0);
 		expect(strictFactMatches("redis", "A predisposition to word games.")).toBe(false);
+		expect(lexicalRelevance(["backup"], "Nightly backups run at 03:00.", "backup")).toBeGreaterThan(0);
+		expect(strictFactMatches("backup", "Nightly backups run at 03:00.")).toBe(true);
+		expect(lexicalRelevance(["backup"], "We will be back tomorrow.", "backup")).toBe(0);
 	});
 
 	it("builds stopword-filtered FTS terms with query-side synonyms", () => {

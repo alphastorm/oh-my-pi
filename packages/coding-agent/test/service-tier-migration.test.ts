@@ -63,6 +63,29 @@ describe("serviceTier → tier.* settings migration", () => {
 		expect(settings.get("tier.google")).toBe("priority");
 	});
 
+	it("preserves downstream scout priority through service-tier key cutover and save", async () => {
+		const settings = await loadWith({
+			task: { agentTierOverrides: { scout: "priority" } },
+			tier: { subagent: "none" },
+		});
+		expect(settings.get("task.agentServiceTierOverrides")).toEqual({ scout: "priority" });
+		expect(settings.get("tier.subagent")).toBe("none");
+		settings.set("tier.openai", "none");
+		await settings.flush();
+		const saved = YAML.parse(await Bun.file(path.join(agentDir, "config.yml")).text()) as {
+			task: Record<string, unknown>;
+		};
+		expect(saved.task.agentServiceTierOverrides).toEqual({ scout: "priority" });
+		expect(saved.task).not.toHaveProperty("agentTierOverrides");
+	});
+
+	it("keeps explicit upstream tier settings authoritative over the retired key", async () => {
+		const settings = await loadWith({
+			task: { agentTierOverrides: { scout: "priority" }, agentServiceTierOverrides: {} },
+		});
+		expect(settings.get("task.agentServiceTierOverrides")).toEqual({});
+	});
+
 	it("scopes openai-only/claude-only to a single family", async () => {
 		const openai = await loadWith({ serviceTier: "openai-only" });
 		expect(openai.get("tier.openai")).toBe("priority");

@@ -2612,6 +2612,24 @@ export class Settings {
 		if (tierTouched) raw.tier = tierObj;
 		delete raw.fastModeScope;
 
+		// Cut the private downstream key over to the upstream per-agent tier map.
+		// Migrate each source layer before merging; an explicit new map wins.
+		{
+			const taskObj = isRecord(raw.task) ? raw.task : undefined;
+			if (taskObj && "agentTierOverrides" in taskObj) {
+				if (!("agentServiceTierOverrides" in taskObj) && !("task.agentServiceTierOverrides" in raw)) {
+					taskObj.agentServiceTierOverrides = taskObj.agentTierOverrides;
+				}
+				delete taskObj.agentTierOverrides;
+			}
+			if ("task.agentTierOverrides" in raw) {
+				if (!("task.agentServiceTierOverrides" in raw) && !(taskObj && "agentServiceTierOverrides" in taskObj)) {
+					raw["task.agentServiceTierOverrides"] = raw["task.agentTierOverrides"];
+				}
+				delete raw["task.agentTierOverrides"];
+			}
+		}
+
 		// advisor.subagents (blanket advisor on every spawned subagent) → per-agent
 		// task.agentAdvisor, migrated to the bundled generic `task` agent. An
 		// explicit boolean maps to "on"/"off" IN THE SAME LAYER — migration runs

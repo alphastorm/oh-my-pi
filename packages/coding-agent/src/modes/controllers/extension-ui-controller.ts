@@ -105,8 +105,8 @@ export class ExtensionUiController {
 		const uiContext: ExtensionUIContext = {
 			timeoutStartsOnPresentation: true,
 			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
-			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
-			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
+			confirm: (title, message, dialogOptions) => this.showCollabAwareConfirm(title, message, dialogOptions),
+			input: (title, placeholder, dialogOptions) => this.showCollabAwareInput(title, placeholder, dialogOptions),
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
@@ -576,12 +576,37 @@ export class ExtensionUiController {
 		this.ctx.ui.requestRender();
 	}
 
+	/** A mirrored dialog must be answerable identically on both surfaces. The
+	 *  guest wire draft carries no timeout: neither the countdown, its reset on
+	 *  input, nor the timeout callbacks have a wire representation, so a dialog
+	 *  that depends on one stays host-local rather than reaching a guest as a
+	 *  weaker dialog that never times out. */
+	#canMirrorDialog(dialogOptions: ExtensionUIDialogOptions | undefined): boolean {
+		return (
+			dialogOptions?.timeout === undefined &&
+			dialogOptions?.onTimeout === undefined &&
+			dialogOptions?.onTimeoutStart === undefined &&
+			dialogOptions?.onTimeoutReset === undefined
+		);
+	}
+
 	async showCollabAwareSelector(
 		title: string,
 		options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
 		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
+		// Selectors additionally lose their local arrow/external-editor
+		// callbacks, disabled rows, and slider across the wire — a guest would
+		// be able to pick a row the host disabled — so those stay host-local.
+		const mirrorable =
+			this.#canMirrorDialog(dialogOptions) &&
+			dialogOptions?.onLeft === undefined &&
+			dialogOptions?.onRight === undefined &&
+			dialogOptions?.onExternalEditor === undefined &&
+			dialogOptions?.disabledIndices === undefined &&
+			extra?.slider === undefined;
+		if (!mirrorable) return this.showHookSelector(title, options, dialogOptions, extra);
 		const request: CollabUiRequestDraft = {
 			kind: "select",
 			title,
@@ -597,12 +622,49 @@ export class ExtensionUiController {
 		);
 	}
 
+	/** A confirmation is a two-option selector on the wire, so a writable guest
+	 *  can answer an extension's `ui.confirm` instead of the prompt being
+	 *  reachable only from the host terminal. */
+	async showCollabAwareConfirm(
+		title: string,
+		message: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<boolean> {
+		const result = await this.showCollabAwareSelector(`${title}\n${message}`, ["Yes", "No"], dialogOptions);
+		return result === "Yes";
+	}
+
+	/** Single-line input mirrors as an editor request: the guest surface has one
+	 *  free-text control, and the host keeps its own input mounted. A placeholder
+	 *  is response guidance the host input renders and the guest editor has no
+	 *  field for, so it is folded into the mirrored title — the same collapse
+	 *  `showCollabAwareConfirm` performs for a confirmation's message — rather
+	 *  than letting a guest answer with less than the host was shown. It is not
+	 *  sent as `prefill`, which would make the hint the submitted text. */
+	async showCollabAwareInput(
+		title: string,
+		placeholder?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<string | undefined> {
+		if (!this.#canMirrorDialog(dialogOptions)) return this.showHookInput(title, placeholder, dialogOptions);
+		const request: CollabUiRequestDraft = {
+			kind: "editor",
+			title: placeholder ? `${title}\n${placeholder}` : title,
+		};
+		return this.#raceCollabDialog(request, dialogOptions?.signal, signal =>
+			this.showHookInput(title, placeholder, { ...dialogOptions, signal }),
+		);
+	}
+
 	async showCollabAwareEditor(
 		title: string,
 		prefill?: string,
 		dialogOptions?: ExtensionUIDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined> {
+		if (!this.#canMirrorDialog(dialogOptions) || editorOptions?.promptStyle === true) {
+			return this.showHookEditor(title, prefill, dialogOptions, editorOptions);
+		}
 		const request: CollabUiRequestDraft = { kind: "editor", title, prefill };
 		return this.#raceCollabDialog(request, dialogOptions?.signal, signal =>
 			this.showHookEditor(title, prefill, { ...dialogOptions, signal }, editorOptions),
@@ -625,16 +687,28 @@ export class ExtensionUiController {
 		const parentSignal = dialogOptions?.signal;
 		const localSignal = parentSignal ? AbortSignal.any([parentSignal, localAbort.signal]) : localAbort.signal;
 		const remoteSignal = parentSignal ? AbortSignal.any([parentSignal, remoteAbort.signal]) : remoteAbort.signal;
-		const localWinner = this.#showLocalAskDialog(normalized, { ...dialogOptions, signal: localSignal }).then(
-			(value): CollabAskDialogWinner => ({ source: "local", value }),
-		);
-		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(host, normalized, remoteSignal).then(
-			result => (result === "unavailable" ? localWinner : { source: "remote", value: result }),
-		);
-		const winner = await Promise.race([localWinner, remoteWinner]);
-		if (winner.source === "remote") localAbort.abort();
-		else remoteAbort.abort();
-		return winner.value;
+		// The winner is never aborted — the settled surface keeps its own
+		// teardown — but the loser is abandoned, so a rejection has to retire
+		// both: otherwise a failure on one surface leaves the other mounted as
+		// a stuck host dialog or a guest ask no frame ever ends.
+		try {
+			const localWinner = this.#showLocalAskDialog(normalized, { ...dialogOptions, signal: localSignal }).then(
+				(value): CollabAskDialogWinner => ({ source: "local", value }),
+			);
+			const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(
+				host,
+				normalized,
+				remoteSignal,
+			).then(result => (result === "unavailable" ? localWinner : { source: "remote", value: result }));
+			const winner = await Promise.race([localWinner, remoteWinner]);
+			if (winner.source === "remote") localAbort.abort();
+			else remoteAbort.abort();
+			return winner.value;
+		} catch (error) {
+			localAbort.abort();
+			remoteAbort.abort();
+			throw error;
+		}
 	}
 
 	#showLocalAskDialog(
@@ -763,16 +837,22 @@ export class ExtensionUiController {
 			signal ? AbortSignal.any([signal, remoteAbort.signal]) : remoteAbort.signal,
 		);
 		if (!remote) return local(signal);
-		const localWinner = local(signal ? AbortSignal.any([signal, localAbort.signal]) : localAbort.signal).then(
-			(value): CollabDialogWinner => ({ source: "local", value }),
-		);
-		const remoteWinner: Promise<CollabDialogWinner> = remote.then(result =>
-			result.kind === "answered" ? { source: "remote", value: result.value } : localWinner,
-		);
-		const winner = await Promise.race([localWinner, remoteWinner]);
-		if (winner.source === "remote") localAbort.abort();
-		else remoteAbort.abort();
-		return winner.value;
+		try {
+			const localWinner = local(signal ? AbortSignal.any([signal, localAbort.signal]) : localAbort.signal).then(
+				(value): CollabDialogWinner => ({ source: "local", value }),
+			);
+			const remoteWinner: Promise<CollabDialogWinner> = remote.then(result =>
+				result.kind === "answered" ? { source: "remote", value: result.value } : localWinner,
+			);
+			const winner = await Promise.race([localWinner, remoteWinner]);
+			if (winner.source === "remote") localAbort.abort();
+			else remoteAbort.abort();
+			return winner.value;
+		} catch (error) {
+			localAbort.abort();
+			remoteAbort.abort();
+			throw error;
+		}
 	}
 
 	async #runGuestAskDialog(

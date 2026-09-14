@@ -629,6 +629,26 @@ class StubDialogController extends ExtensionUiController {
 		_options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
 	): Promise<string | undefined> {
+		return this.#stubDialog(title, dialogOptions);
+	}
+
+	override showHookInput(
+		title: string,
+		_placeholder?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<string | undefined> {
+		return this.#stubDialog(title, dialogOptions);
+	}
+
+	override showHookEditor(
+		title: string,
+		_prefill?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<string | undefined> {
+		return this.#stubDialog(title, dialogOptions);
+	}
+
+	#stubDialog(title: string, dialogOptions?: ExtensionUIDialogOptions): Promise<string | undefined> {
 		const { promise, resolve } = Promise.withResolvers<string | undefined>();
 		let settled = false;
 		const settle = (value: string | undefined): void => {
@@ -1118,6 +1138,183 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 			}
 			guest.socket.close();
 		} finally {
+			await host.stop("test done");
+		}
+	});
+});
+
+// ── Mirroring guards and the confirm/input surfaces ─────────────────────────
+//
+// A guest answers over `CollabUiRequestDraft`, which carries labels and a
+// prefill and nothing else: no timeout, no local arrow/external-editor
+// callbacks, no disabled rows, no slider, no prompt styling. A dialog that
+// depends on any of those must therefore stay host-local instead of reaching a
+// guest as a weaker dialog that answers the host's prompt anyway. Everything
+// else an extension raises — including `ui.confirm` and `ui.input` — is
+// answerable from a writable guest.
+
+/** Drain to the next host `ui-request`; `ui-request-end` and other directed
+ *  frames legitimately arrive between rounds. */
+async function nextGuestUiRequest(guest: {
+	nextFrame(): Promise<CollabFrame>;
+}): Promise<CollabFrame & { t: "ui-request" }> {
+	for (;;) {
+		const frame = await guest.nextFrame();
+		if (frame.t === "ui-request") return frame;
+	}
+}
+
+describe("collab dialog mirroring guards", () => {
+	async function openHost(): Promise<{
+		host: CollabHost;
+		controller: StubDialogController;
+		cleanup(): Promise<void>;
+	}> {
+		const ctx = makeHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		return {
+			host,
+			controller: new StubDialogController(ctx),
+			cleanup: () => host.stop("test done"),
+		};
+	}
+
+	it("mirrors a plain selector but keeps one with disabled rows host-local", async () => {
+		const { host, controller, cleanup } = await openHost();
+		try {
+			const mirrored = controller.showCollabAwareSelector("Pick one", ["Alpha", "Beta"]);
+			expect(host.inputRequired).toBe(true);
+			controller.localDialogs[0]?.settle("Alpha");
+			expect(await mirrored).toBe("Alpha");
+
+			const guarded = controller.showCollabAwareSelector("Pick one", ["Alpha", "Beta"], {
+				disabledIndices: [1],
+			});
+			expect(host.inputRequired).toBe(false);
+			controller.localDialogs[1]?.settle("Alpha");
+			expect(await guarded).toBe("Alpha");
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("keeps a slider selector host-local", async () => {
+		const { host, controller, cleanup } = await openHost();
+		try {
+			const guarded = controller.showCollabAwareSelector("Set effort", ["Low", "High"], undefined, {
+				slider: { segments: [{ label: "Low" }, { label: "High" }], index: 0 },
+			});
+			expect(host.inputRequired).toBe(false);
+			controller.localDialogs[0]?.settle("Low");
+			expect(await guarded).toBe("Low");
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("keeps timed and prompt-styled dialogs host-local", async () => {
+		const { host, controller, cleanup } = await openHost();
+		try {
+			const timed = controller.showCollabAwareEditor("Timed", undefined, { timeout: 5_000 });
+			expect(host.inputRequired).toBe(false);
+			controller.localDialogs[0]?.settle("typed");
+			expect(await timed).toBe("typed");
+
+			const styled = controller.showCollabAwareEditor("Styled", undefined, undefined, { promptStyle: true });
+			expect(host.inputRequired).toBe(false);
+			controller.localDialogs[1]?.settle("styled");
+			expect(await styled).toBe("styled");
+
+			const mirrored = controller.showCollabAwareEditor("Plain", "draft");
+			expect(host.inputRequired).toBe(true);
+			controller.localDialogs[2]?.settle("plain");
+			expect(await mirrored).toBe("plain");
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("lets a writable guest answer confirm and input prompts", async () => {
+		const { host, controller, cleanup } = await openHost();
+		let guest: { socket: CollabSocket; nextFrame(): Promise<CollabFrame> } | undefined;
+		try {
+			guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			const confirmed = controller.showCollabAwareConfirm("Deploy?", "to production");
+			const confirmRequest = await guest.nextFrame();
+			if (confirmRequest.t !== "ui-request") throw new Error(`expected ui-request, got ${confirmRequest.t}`);
+			if (confirmRequest.request.kind !== "select") {
+				throw new Error(`expected select, got ${confirmRequest.request.kind}`);
+			}
+			expect(confirmRequest.request.title).toBe("Deploy?\nto production");
+			expect(confirmRequest.request.options.map(o => (typeof o === "string" ? o : o.label))).toEqual(["Yes", "No"]);
+			guest.socket.send({ t: "ui-response", reqId: confirmRequest.request.reqId, value: "Yes" });
+			expect(await confirmed).toBe(true);
+
+			const named = controller.showCollabAwareInput("Branch name", "feature/…");
+			const inputRequest = await nextGuestUiRequest(guest);
+			if (inputRequest.request.kind !== "editor") {
+				throw new Error(`expected editor, got ${inputRequest.request.kind}`);
+			}
+			// The guest editor has no placeholder field, so the hint the host
+			// input renders must still reach the guest or the guest answers with
+			// less guidance than the host was shown.
+			expect(inputRequest.request.title).toBe("Branch name\nfeature/…");
+			expect(inputRequest.request.prefill).toBeUndefined();
+			expect(controller.localDialogs.at(-1)?.title).toBe("Branch name");
+			guest.socket.send({ t: "ui-response", reqId: inputRequest.request.reqId, value: "feature/collab" });
+			expect(await named).toBe("feature/collab");
+
+			// A placeholderless input mirrors its bare title.
+			const plain = controller.showCollabAwareInput("Ticket id");
+			const plainRequest = await nextGuestUiRequest(guest);
+			expect(plainRequest.request.title).toBe("Ticket id");
+			guest.socket.send({ t: "ui-response", reqId: plainRequest.request.reqId, value: "OMP-1" });
+			expect(await plain).toBe("OMP-1");
+		} finally {
+			guest?.socket.close();
+			await cleanup();
+		}
+	});
+
+	it("ends the guest ask when the host dialog rejects", async () => {
+		// The two surfaces race; the loser is abandoned. A rejection on the
+		// local side must still retire the guest ask, or the guest keeps a
+		// dialog no answer can ever settle.
+		class RejectingDialogController extends ExtensionUiController {
+			override showHookSelector(): Promise<string | undefined> {
+				return Promise.reject(new Error("local dialog failed"));
+			}
+		}
+		const ctx = makeHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new RejectingDialogController(ctx);
+		let guest: { socket: CollabSocket; nextFrame(): Promise<CollabFrame> } | undefined;
+		try {
+			guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			// Attach the rejection expectation before awaiting frames: the local
+			// surface rejects on the same tick the guest ask is sent.
+			const rejected = expect(controller.showCollabAwareSelector("Pick one", ["Alpha", "Beta"])).rejects.toThrow(
+				"local dialog failed",
+			);
+			const request = await nextGuestUiRequest(guest);
+			await rejected;
+
+			const end = await guest.nextFrame();
+			if (end.t !== "ui-request-end") throw new Error(`expected ui-request-end, got ${end.t}`);
+			expect(end.reqId).toBe(request.request.reqId);
+			expect(host.inputRequired).toBe(false);
+		} finally {
+			guest?.socket.close();
 			await host.stop("test done");
 		}
 	});

@@ -46,10 +46,9 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 				"process.env.PI_TINY_TRANSFORMERS_VERSION": JSON.stringify(options.transformersVersion),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
 			},
-			// Precompiled bytecode skips parsing the ~20 MB bundle at boot:
-			// `omp --version` 256 ms -> 30 ms on M4 Max (+52 MB binary).
-			// Bytecode rejects top-level await in the bundle graph.
-			bytecode: true,
+			// The locked Bun 1.4.0 runtime rejects this graph's bytecode at startup
+			// with an import.meta syntax error. Retain source compilation.
+			bytecode: false,
 			minify: {
 				identifiers: options.minifyIdentifiers ?? false,
 				keepNames: true,

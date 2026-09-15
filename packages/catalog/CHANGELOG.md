@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Copilot OAuth retirement after a hard 401 now resolves from runtime KDL without a model lookup, keeping provider deployment policy out of the auth runtime ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+
 ## [18.2.1] - 2026-09-15
 
 ### Added

@@ -185,18 +185,6 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	onModerationMetadata?: (metadata: unknown) => void;
 }
 
-/**
- * `access_programs` for a ChatGPT Codex request. codex-rs forwards the cyber
- * program only for ChatGPT-authenticated first-party requests and omits it for
- * API-key and custom-provider requests, so any other provider gets nothing.
- */
-export function codexAccessPrograms(
-	model: Pick<Model, "provider">,
-	program: CodexCyberAccessProgram | undefined,
-): { cyber: CodexCyberAccessProgram } | undefined {
-	return program !== undefined && model.provider === "openai-codex" ? { cyber: program } : undefined;
-}
-
 /** Raw V2 compaction body accepted by the Codex transport selector. */
 export interface OpenAICodexCompactionBody extends CodexLiteShapedBody {
 	model: string;
@@ -1523,6 +1511,13 @@ async function buildCodexRequestContext(
 	});
 }
 
+/** codex-rs `CyberAccessProgram` wire values; nothing else is ever sent. */
+const CODEX_CYBER_ACCESS_PROGRAMS: Record<CodexCyberAccessProgram, true> = {
+	standard: true,
+	daybreak_blue: true,
+	daybreak_red: true,
+};
+
 /** Serialize normal Codex turns and V2 compaction with the same cacheable prefix. */
 export async function buildTransformedCodexRequestBody(
 	model: Model<"openai-codex-responses">,
@@ -1548,6 +1543,18 @@ export async function buildTransformedCodexRequestBody(
 	// everything from `StreamOptions` rather than forwarding any of them.
 	// (#3117 — codex-rs sends none of these either.)
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
+	// codex-rs sends the cyber access program only on first-party ChatGPT
+	// requests; custom providers speaking this API never receive it. An untyped
+	// caller's value outside the codex-rs set (`null`, the setting's `auto` or
+	// `daybreak-blue` spelling, a typo) is omitted rather than sent.
+	const cyberAccessProgram = options?.cyberAccessProgram;
+	if (
+		model.provider === "openai-codex" &&
+		typeof cyberAccessProgram === "string" &&
+		Object.hasOwn(CODEX_CYBER_ACCESS_PROGRAMS, cyberAccessProgram)
+	) {
+		params.access_programs = { cyber: cyberAccessProgram };
+	}
 	if (context.tools && context.tools.length > 0) {
 		params.tools = convertOpenAICodexResponsesTools(context.tools, model);
 		if (options?.toolChoice) {
@@ -1577,8 +1584,6 @@ export async function buildTransformedCodexRequestBody(
 	};
 
 	const body = await transformRequestBody(params, model, codexOptions, { developerMessages });
-	const accessPrograms = codexAccessPrograms(model, options?.cyberAccessProgram);
-	if (accessPrograms) body.access_programs = accessPrograms;
 	applyCodexStableEffort(model, body, options);
 	return body;
 }
@@ -3533,8 +3538,9 @@ function recordCodexTurnUsageDiagnostics(
 }
 
 // Per-turn request fields that may change without breaking a websocket chain.
-// codex-rs likewise ignores `access_programs` when deciding whether a request
-// extends the previous response, so a new program rides on the delta.
+// codex-rs leaves `access_programs` out of its websocket reuse check
+// (`responses_request_properties_match`): programs are authorized per
+// response, including continuations, so a new program rides on the delta.
 const CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP = {
 	service_tier: true,
 	access_programs: true,

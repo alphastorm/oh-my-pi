@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `SummaryOptions.codexCyberAccessProgram`, forwarded as `access_programs.cyber` on Codex V2 remote compaction and local summarization requests ([#12994](https://github.com/can1357/oh-my-pi/pull/12994) by [@alphastorm](https://github.com/alphastorm)).
+
 ## [18.2.11] - 2026-09-23
 
 ### Fixed

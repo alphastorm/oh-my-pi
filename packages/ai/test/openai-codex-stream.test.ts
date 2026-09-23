@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type {
 	CodexCompactionRequestContext,
+	CodexCyberAccessProgram,
 	Context,
 	FetchImpl,
 	Model,
@@ -2067,7 +2068,7 @@ describe("openai-codex streaming", () => {
 		expect(result.usage.cost.total).toBeCloseTo(0.000022);
 	});
 
-	it("sends the cyber access program only to the first-party openai-codex provider", async () => {
+	it("sends only codex-rs cyber access programs, and only to the first-party openai-codex provider", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
 		const payload = Buffer.from(
@@ -2108,9 +2109,20 @@ describe("openai-codex streaming", () => {
 		await streamSimple(firstParty, context, { ...options, codexCyberAccessProgram: "daybreak_blue" }).result();
 		await streamSimple(firstParty, context, options).result();
 		await streamSimple(custom, context, { ...options, codexCyberAccessProgram: "daybreak_blue" }).result();
+		// Untyped callers: a setting spelling, null, and a prototype key never reach the wire.
+		for (const untyped of ["auto", "daybreak-blue", null, "constructor"]) {
+			await streamSimple(firstParty, context, {
+				...options,
+				codexCyberAccessProgram: untyped as unknown as CodexCyberAccessProgram,
+			}).result();
+		}
 
 		expect(capturedBodies.map(body => body.access_programs)).toEqual([
 			{ cyber: "daybreak_blue" },
+			undefined,
+			undefined,
+			undefined,
+			undefined,
 			undefined,
 			undefined,
 		]);

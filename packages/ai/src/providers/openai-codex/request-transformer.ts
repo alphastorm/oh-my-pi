@@ -1,7 +1,7 @@
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
-import type { Model } from "../../types";
+import type { CodexCyberAccessProgram, Model } from "../../types";
 import { mapOpenAIReasoningEffort } from "../openai-shared";
 
 /** Reasoning replay scope for the Codex Responses API (`reasoning.context`). */
@@ -87,6 +87,8 @@ export interface RequestBody {
 	max_output_tokens?: number;
 	max_completion_tokens?: number;
 	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
+	/** Per-turn cyber access program (codex-rs `AccessPrograms`). */
+	access_programs?: { cyber: CodexCyberAccessProgram };
 	[key: string]: unknown;
 }
 

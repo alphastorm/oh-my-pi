@@ -842,6 +842,21 @@ describe("AgentSession advisor context maintenance", () => {
 		expect(JSON.stringify(advisor.state.messages)).toContain("same-provider native summary");
 	});
 
+	it("forwards the Codex cyber access setting on advisor compaction", async () => {
+		const { settings } = createAdvisorFallbackHarness();
+		settings.set("providers.openai-codex.cyberAccess", "daybreak-red");
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "advisor summary",
+			shortSummary: "advisor",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 42,
+		}));
+
+		await session.prompt("small current update");
+
+		expect(compactSpy.mock.calls.map(call => call[5]?.codexCyberAccessProgram)).toEqual(["daybreak_red"]);
+	});
+
 	it("skips unauthenticated advisor candidates before enforcing the native boundary", async () => {
 		const { advisor, apiKeySpy, crossProviderModel, nativeModel, sameProviderModel, settings } =
 			createAdvisorFallbackHarness();

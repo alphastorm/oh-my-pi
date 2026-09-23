@@ -107,6 +107,7 @@ import type { CompactionEntry, SessionEntry } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
 import type { SessionManager } from "./session-manager";
 import { buildSessionMetadata } from "./session-metadata";
+import { codexCyberAccessProgram } from "./settings-stream-fn";
 import type { YieldQueue } from "./yield-queue";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
@@ -2000,6 +2001,7 @@ export class SessionAdvisors {
 						metadata: advisorMetadata,
 						providerSessionState: this.#host.providerSessionState,
 						preferWebsockets: this.#host.preferWebsockets,
+						codexCyberAccessProgram: codexCyberAccessProgram(this.#host.settings),
 						codexCompaction,
 					},
 				);

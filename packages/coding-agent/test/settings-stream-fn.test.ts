@@ -164,7 +164,7 @@ describe("createSettingsAwareStreamFn", () => {
 	});
 
 	it("maps providers.openai-codex.cyberAccess to the wire program, leaves auto unset, and lets callers override", () => {
-		const programFor = (value: "auto" | "standard" | "daybreak-blue" | "daybreak-red") => {
+		const programFor = (value: "auto" | "standard" | "daybreak_blue" | "daybreak_red") => {
 			const { fn: base, calls } = captureBase();
 			createSettingsAwareStreamFn(Settings.isolated({ "providers.openai-codex.cyberAccess": value }), base)(
 				stubCodexModel,
@@ -176,12 +176,12 @@ describe("createSettingsAwareStreamFn", () => {
 		expect([
 			programFor("auto"),
 			programFor("standard"),
-			programFor("daybreak-blue"),
-			programFor("daybreak-red"),
+			programFor("daybreak_blue"),
+			programFor("daybreak_red"),
 		]).toEqual([undefined, "standard", "daybreak_blue", "daybreak_red"]);
 
 		const { fn: base, calls } = captureBase();
-		createSettingsAwareStreamFn(Settings.isolated({ "providers.openai-codex.cyberAccess": "daybreak-red" }), base)(
+		createSettingsAwareStreamFn(Settings.isolated({ "providers.openai-codex.cyberAccess": "daybreak_red" }), base)(
 			stubCodexModel,
 			stubContext,
 			{ codexCyberAccessProgram: "standard" },

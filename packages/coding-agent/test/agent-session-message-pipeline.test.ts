@@ -868,7 +868,7 @@ describe("AgentSession message pipeline", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({
 				"compaction.enabled": false,
-				"providers.openai-codex.cyberAccess": "daybreak-red",
+				"providers.openai-codex.cyberAccess": "daybreak_red",
 			}),
 			modelRegistry: {} as never,
 		});

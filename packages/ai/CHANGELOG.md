@@ -8,7 +8,7 @@
 - Added persistent rate-limit block tracking with auto-healing and account-specific routing policy support
 - Introduced `KeyCascade` for unified hierarchical authentication resolution
 - Added per-account OAuth routing policies with strict selectors, deterministic priority, and protected quota reserves ([#12243](https://github.com/can1357/oh-my-pi/pull/12243) by [@schickling-assistant](https://github.com/schickling-assistant)).
-- Added `SimpleStreamOptions.codexCyberAccessProgram`, sent as `access_programs.cyber` on first-party `openai-codex` Responses requests without breaking websocket continuations ([#12994](https://github.com/can1357/oh-my-pi/pull/12994) by [@alphastorm](https://github.com/alphastorm)).
+- Added `SimpleStreamOptions.codexCyberAccessProgram`, sent as `access_programs.cyber` on first-party `openai-codex` Responses requests when the model's catalog entry accepts the program, without breaking websocket continuations ([#12994](https://github.com/can1357/oh-my-pi/pull/12994) by [@alphastorm](https://github.com/alphastorm)).
 
 ### Changed
 

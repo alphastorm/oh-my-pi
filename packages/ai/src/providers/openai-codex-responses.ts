@@ -1,6 +1,7 @@
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { isCodexCyberAccessProgram } from "@oh-my-pi/pi-catalog/types";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
@@ -153,7 +154,8 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	/**
 	 * Cyber access program requested for this turn (codex-rs
 	 * `access_programs.cyber`). Forwarded only to the first-party `openai-codex`
-	 * provider; omitted keeps the backend's automatic treatment.
+	 * provider and only when the model's catalog accepts it; omitted keeps the
+	 * backend's automatic treatment.
 	 */
 	cyberAccessProgram?: CodexCyberAccessProgram;
 	/**
@@ -1511,13 +1513,6 @@ async function buildCodexRequestContext(
 	});
 }
 
-/** codex-rs `CyberAccessProgram` wire values; nothing else is ever sent. */
-const CODEX_CYBER_ACCESS_PROGRAMS: Record<CodexCyberAccessProgram, true> = {
-	standard: true,
-	daybreak_blue: true,
-	daybreak_red: true,
-};
-
 /** Serialize normal Codex turns and V2 compaction with the same cacheable prefix. */
 export async function buildTransformedCodexRequestBody(
 	model: Model<"openai-codex-responses">,
@@ -1544,14 +1539,18 @@ export async function buildTransformedCodexRequestBody(
 	// (#3117 — codex-rs sends none of these either.)
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
 	// codex-rs sends the cyber access program only on first-party ChatGPT
-	// requests; custom providers speaking this API never receive it. An untyped
-	// caller's value outside the codex-rs set (`null`, the setting's `auto` or
-	// `daybreak-blue` spelling, a typo) is omitted rather than sent.
+	// requests; custom providers speaking this API never receive it. Only codex-rs
+	// program values are sent: an untyped caller's `null`, `auto`, or typo is
+	// omitted, since the backend rejects invalid values. A model whose catalog
+	// entry lists its accepted programs gets only those (the backend answers a
+	// mismatched pair with `invalid_access_program`); without that metadata the
+	// program is sent as-is.
 	const cyberAccessProgram = options?.cyberAccessProgram;
+	const acceptedPrograms = model.availableAccessPrograms?.cyber;
 	if (
 		model.provider === "openai-codex" &&
-		typeof cyberAccessProgram === "string" &&
-		Object.hasOwn(CODEX_CYBER_ACCESS_PROGRAMS, cyberAccessProgram)
+		isCodexCyberAccessProgram(cyberAccessProgram) &&
+		(acceptedPrograms === undefined || acceptedPrograms.includes(cyberAccessProgram))
 	) {
 		params.access_programs = { cyber: cyberAccessProgram };
 	}

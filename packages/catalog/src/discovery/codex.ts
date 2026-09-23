@@ -2,7 +2,7 @@ import { type } from "@oh-my-pi/omptype";
 import { compareRevision, parseRevision } from "../compat/revision";
 import { classifyModel } from "../compat/taxonomy";
 import { getBundledModels } from "../models";
-import type { FetchImpl, ModelSpec } from "../types";
+import { type CodexModelAccessPrograms, type FetchImpl, isCodexCyberAccessProgram, type ModelSpec } from "../types";
 import { discoveryFetch } from "../utils";
 import { CODEX_BASE_URL, CODEX_CLIENT_VERSION, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
 
@@ -70,6 +70,7 @@ const codexModelEntrySchema = type({
 	"prefer_websockets?": "unknown",
 	"use_responses_lite?": "unknown",
 	"tool_mode?": "unknown",
+	"available_access_programs?": "unknown",
 });
 
 const codexModelsResponseSchema = type({
@@ -296,6 +297,7 @@ interface ParsedCodexModelEntry {
 	preferWebsockets: boolean;
 	useResponsesLite: boolean;
 	toolMode: boolean;
+	availableAccessPrograms: CodexModelAccessPrograms | undefined;
 	priority: number;
 }
 
@@ -326,8 +328,22 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 		preferWebsockets: toBoolean(payload.prefer_websockets) === true,
 		useResponsesLite: toBoolean(payload.use_responses_lite) === true,
 		toolMode: payload.tool_mode === "code_mode_only",
+		availableAccessPrograms: parseAvailableAccessPrograms(payload.available_access_programs),
 		priority: toFiniteNumber(payload.priority) ?? Number.MAX_SAFE_INTEGER,
 	};
+}
+
+/**
+ * `available_access_programs` (codex-rs `ModelAccessPrograms`). Unknown cyber
+ * programs are dropped so a newer server program cannot hide the entry, and an
+ * empty list stays distinct from missing metadata. `null`, or an object without
+ * a `cyber` list, counts as missing.
+ */
+function parseAvailableAccessPrograms(value: unknown): CodexModelAccessPrograms | undefined {
+	if (value === null || typeof value !== "object" || !("cyber" in value) || !Array.isArray(value.cyber)) {
+		return undefined;
+	}
+	return { cyber: value.cyber.filter(isCodexCyberAccessProgram) };
 }
 
 /**
@@ -383,6 +399,7 @@ function buildNormalizedCodexModel(
 			...(parsed.preferWebsockets ? { preferWebsockets: true } : {}),
 			...(parsed.useResponsesLite ? { useResponsesLite: true } : {}),
 			...(parsed.toolMode ? { toolMode: "code_mode_only" as const } : {}),
+			...(parsed.availableAccessPrograms ? { availableAccessPrograms: parsed.availableAccessPrograms } : {}),
 			...(parsed.priority !== Number.MAX_SAFE_INTEGER ? { priority: parsed.priority } : {}),
 		},
 	};

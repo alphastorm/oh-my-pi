@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `providers.openai-codex.cyberAccess` to request a Codex cyber access program (`standard`, `daybreak-blue`, `daybreak-red`) on ChatGPT Codex turns, side requests, and compaction; the default `auto` omits it ([#12994](https://github.com/can1357/oh-my-pi/pull/12994) by [@alphastorm](https://github.com/alphastorm)).
+- Added `providers.openai-codex.cyberAccess` to request a Codex cyber access program (`standard`, `daybreak_blue`, `daybreak_red`) on the session's agent conversations: main, advisor, and subagent turns, their side requests, and their compaction. One-shot helpers never send it, and the default `auto` omits it ([#12994](https://github.com/can1357/oh-my-pi/pull/12994) by [@alphastorm](https://github.com/alphastorm)).
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
 - Enabled `org-scoped-identity` and `oauth-token-env` configuration parsing for authentication providers
 - Adopted namespaced `authStorage` API for CLI and session management

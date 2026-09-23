@@ -64,6 +64,28 @@ export function modelKind(model: Pick<Model, "kind">): ModelKind {
 	return model.kind ?? "chat";
 }
 
+/** codex-rs `CyberAccessProgram` wire values for `access_programs.cyber`. */
+export const CODEX_CYBER_ACCESS_PROGRAMS = ["standard", "daybreak_blue", "daybreak_red"] as const;
+/**
+ * Cyber treatment requested for a ChatGPT-authenticated Codex turn, sent as
+ * `access_programs.cyber`. The backend owns authorization; omitting it keeps
+ * its automatic treatment.
+ */
+export type CodexCyberAccessProgram = (typeof CODEX_CYBER_ACCESS_PROGRAMS)[number];
+
+/** Whether an untyped value is a codex-rs cyber access program. */
+export function isCodexCyberAccessProgram(value: unknown): value is CodexCyberAccessProgram {
+	return typeof value === "string" && (CODEX_CYBER_ACCESS_PROGRAMS as readonly string[]).includes(value);
+}
+
+/**
+ * Explicit access programs a Codex model accepts (codex-rs `ModelAccessPrograms`).
+ * An empty list is distinct from missing metadata.
+ */
+export interface CodexModelAccessPrograms {
+	cyber: readonly CodexCyberAccessProgram[];
+}
+
 /** Canonical thinking transport used by a model. */
 export type ThinkingControlMode =
 	| "effort"
@@ -1304,6 +1326,12 @@ export interface Model<TApi extends Api = Api> {
 	useResponsesLite?: boolean;
 	/** Codex Code Mode restriction: model expects tools routed through a programmatic exec surface (mirrors codex-rs `tool_mode`). */
 	toolMode?: "code_mode_only";
+	/**
+	 * Explicit access programs the Codex catalog advertises for this model (mirrors
+	 * codex-rs `available_access_programs`). Missing metadata sends a requested
+	 * program as-is; a present list, even an empty one, drops programs outside it.
+	 */
+	availableAccessPrograms?: CodexModelAccessPrograms;
 	/** Preferred model to switch to when context promotion is triggered (model id or provider/id). */
 	contextPromotionTarget?: string;
 	/** Preferred model to use only for compaction (model id or provider/id); the active session model is unchanged. */

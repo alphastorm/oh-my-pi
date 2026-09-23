@@ -2109,7 +2109,7 @@ describe("openai-codex streaming", () => {
 		await streamSimple(firstParty, context, { ...options, codexCyberAccessProgram: "daybreak_blue" }).result();
 		await streamSimple(firstParty, context, options).result();
 		await streamSimple(custom, context, { ...options, codexCyberAccessProgram: "daybreak_blue" }).result();
-		// Untyped callers: a setting spelling, null, and a prototype key never reach the wire.
+		// Untyped callers: the setting's `auto`, a kebab typo, null, and a prototype key never reach the wire.
 		for (const untyped of ["auto", "daybreak-blue", null, "constructor"]) {
 			await streamSimple(firstParty, context, {
 				...options,
@@ -2126,6 +2126,58 @@ describe("openai-codex streaming", () => {
 			undefined,
 			undefined,
 		]);
+	});
+
+	it("drops a cyber access program the model's catalog entry does not accept", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const payload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
+			"utf8",
+		).toBase64();
+		const capturedBodies: Array<Record<string, unknown>> = [];
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] } })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+			capturedBodies.push(JSON.parse(decodeCodexRequestBody(init?.body)) as Record<string, unknown>);
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
+		const catalogModel = (cyber: CodexCyberAccessProgram[]): Model<"openai-codex-responses"> =>
+			buildModel({
+				id: "gpt-5.1-codex",
+				name: "GPT-5.1 Codex",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				baseUrl: "https://chatgpt.com/backend-api",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0 },
+				contextWindow: 400000,
+				maxTokens: 128000,
+				availableAccessPrograms: { cyber },
+			});
+		const context: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+		const options = { fetch: fetchMock as FetchImpl, apiKey: `aaa.${payload}.bbb` };
+
+		// Missing metadata sends the program as-is (above). A listed program is
+		// sent; an unlisted one, or any program against an empty list, is dropped.
+		await streamSimple(catalogModel(["standard"]), context, {
+			...options,
+			codexCyberAccessProgram: "standard",
+		}).result();
+		await streamSimple(catalogModel(["standard"]), context, {
+			...options,
+			codexCyberAccessProgram: "daybreak_red",
+		}).result();
+		await streamSimple(catalogModel([]), context, { ...options, codexCyberAccessProgram: "standard" }).result();
+
+		expect(capturedBodies.map(body => body.access_programs)).toEqual([{ cyber: "standard" }, undefined, undefined]);
 	});
 	it("bills priority turns at the model's baked serviceTierCost multiplier (gpt-5.5 = 2.5x)", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
@@ -4007,22 +4059,40 @@ describe("openai-codex streaming", () => {
 				{ role: "user", content: "Third question", timestamp: startedAt + 2 },
 			],
 		};
-		await streamOpenAICodexResponses(model, thirdContext, {
+		const thirdResponse = await streamOpenAICodexResponses(model, thirdContext, {
 			...baseOptions,
 			cyberAccessProgram: "standard",
 		}).result();
+		// Set -> unset: the chain's last request carried a program that must not linger.
+		const fourthContext: Context = {
+			systemPrompt: firstContext.systemPrompt,
+			messages: [
+				...thirdContext.messages,
+				thirdResponse,
+				{ role: "user", content: "Fourth question", timestamp: startedAt + 3 },
+			],
+		};
+		await streamOpenAICodexResponses(model, fourthContext, baseOptions).result();
 
 		expect(fetchMock).not.toHaveBeenCalled();
-		// codex-rs sends each program alongside the previous response id rather
-		// than replaying the transcript.
+		// codex-rs sends each program, and its removal, alongside the previous
+		// response id rather than replaying the transcript
+		// (`cyber_access_program_changes_on_one_websocket_with_response_reuse`).
 		expect(sentRequests.map(request => request.access_programs)).toEqual([
 			undefined,
 			{ cyber: "daybreak_blue" },
 			{ cyber: "standard" },
+			undefined,
 		]);
-		expect(sentRequests.map(request => request.previous_response_id)).toEqual([undefined, "resp_1", "resp_2"]);
+		expect(sentRequests.map(request => request.previous_response_id)).toEqual([
+			undefined,
+			"resp_1",
+			"resp_2",
+			"resp_3",
+		]);
 		expect(JSON.stringify(sentRequests[1]?.input)).not.toContain("First question");
 		expect(JSON.stringify(sentRequests[2]?.input)).not.toContain("Second question");
+		expect(JSON.stringify(sentRequests[3]?.input)).not.toContain("Third question");
 	});
 
 	it("records websocket delta request and usage diagnostics", async () => {

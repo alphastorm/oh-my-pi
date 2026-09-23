@@ -471,7 +471,7 @@ describe("async speculative compaction", () => {
 	});
 
 	it("forwards the Codex cyber access setting on speculative and threshold compaction", async () => {
-		maintenanceSettings.override("providers.openai-codex.cyberAccess", "daybreak-blue");
+		maintenanceSettings.override("providers.openai-codex.cyberAccess", "daybreak_blue");
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
 			summary: "summary",
 			firstKeptEntryId: preparation.firstKeptEntryId,

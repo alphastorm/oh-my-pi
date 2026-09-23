@@ -492,7 +492,7 @@ export const SETTINGS_SCHEMA = {
 
 	"providers.openai-codex.cyberAccess": {
 		type: "enum",
-		values: ["auto", "standard", "daybreak-blue", "daybreak-red"] as const,
+		values: ["auto", "standard", "daybreak_blue", "daybreak_red"] as const,
 		default: "auto",
 		ui: {
 			tab: "providers",
@@ -501,17 +501,21 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"Cyber access program requested on ChatGPT Codex requests (`access_programs.cyber`). The backend decides whether your workspace is authorized for it.",
 			options: [
-				{ value: "auto", label: "Auto", description: "Omit the field; the backend applies its default treatment" },
-				{ value: "standard", label: "Standard", description: "Request standard cyber treatment" },
 				{
-					value: "daybreak-blue",
+					value: "auto",
+					label: "Auto",
+					description: "Omit the field; the backend picks a compatible program for the model and your access",
+				},
+				{ value: "standard", label: "Standard", description: "Request standard safeguards" },
+				{
+					value: "daybreak_blue",
 					label: "Daybreak Blue",
-					description: "Request the defensive Daybreak Blue program",
+					description: "Approved defensive security work",
 				},
 				{
-					value: "daybreak-red",
+					value: "daybreak_red",
 					label: "Daybreak Red",
-					description: "Request the Daybreak Red program",
+					description: "Advanced, authorized security work on cyber models; requires Daybreak Red approval",
 				},
 			],
 		},

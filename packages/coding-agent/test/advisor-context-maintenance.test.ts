@@ -844,7 +844,7 @@ describe("AgentSession advisor context maintenance", () => {
 
 	it("forwards the Codex cyber access setting on advisor compaction", async () => {
 		const { settings } = createAdvisorFallbackHarness();
-		settings.set("providers.openai-codex.cyberAccess", "daybreak-red");
+		settings.set("providers.openai-codex.cyberAccess", "daybreak_red");
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
 			summary: "advisor summary",
 			shortSummary: "advisor",

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `availableAccessPrograms` on discovered Codex models, parsed from the catalog's `available_access_programs` like codex-rs: unknown programs are dropped, and an empty list stays distinct from missing metadata ([#12994](https://github.com/can1357/oh-my-pi/pull/12994) by [@alphastorm](https://github.com/alphastorm)).
 - Added `org-scoped-identity` and `oauth-token-env` rule support for auth providers
 
 ## [18.2.11] - 2026-09-23

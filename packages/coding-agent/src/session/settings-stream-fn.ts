@@ -26,16 +26,8 @@ function timeoutSecondsToMs(value: number): number | undefined {
  * The `openai-codex` provider is the only one that forwards the result.
  */
 export function codexCyberAccessProgram(settings: Settings): CodexCyberAccessProgram | undefined {
-	switch (settings.get("providers.openai-codex.cyberAccess")) {
-		case "standard":
-			return "standard";
-		case "daybreak-blue":
-			return "daybreak_blue";
-		case "daybreak-red":
-			return "daybreak_red";
-		default:
-			return undefined;
-	}
+	const program = settings.get("providers.openai-codex.cyberAccess");
+	return program === "auto" ? undefined : program;
 }
 
 /**

@@ -34,7 +34,16 @@ import type {
 	WriteResult,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
+import type {
+	Api,
+	CodexCyberAccessProgram,
+	FetchImpl,
+	KnownApi,
+	Model,
+	Provider,
+	ThinkingBudgets,
+	Usage,
+} from "@oh-my-pi/pi-catalog/types";
 import type { ApiKey } from "./auth-retry";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -138,14 +147,6 @@ export type CacheRetention = "none" | "short" | "long";
  * scoped sentinel values — see {@link serviceTierFamily}.
  */
 export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority";
-
-/**
- * Cyber treatment requested for a ChatGPT-authenticated Codex turn, sent as
- * `access_programs.cyber` (codex-rs `CyberAccessProgram`). The backend owns
- * authorization and model-tier restrictions; omitting it keeps its automatic
- * treatment.
- */
-export type CodexCyberAccessProgram = "standard" | "daybreak_blue" | "daybreak_red";
 
 /** Provider families that expose an independent service-tier knob. */
 export type ServiceTierFamily = "openai" | "anthropic" | "google";
@@ -724,7 +725,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	/**
 	 * Cyber access program for OpenAI Codex (ChatGPT) requests, sent as
 	 * `access_programs.cyber`. Only the first-party `openai-codex` provider
-	 * forwards it; every other provider ignores it.
+	 * forwards it, and only when the model's catalog entry (if it lists programs)
+	 * accepts it; every other provider ignores it.
 	 */
 	codexCyberAccessProgram?: CodexCyberAccessProgram;
 	/**

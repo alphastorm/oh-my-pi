@@ -122,6 +122,44 @@ describe("Codex model discovery", () => {
 		expect(legacy?.useResponsesLite).toBeUndefined();
 	});
 
+	it("carries available_access_programs onto the model spec, keeping empty lists distinct from missing", async () => {
+		const result = await fetchCodexModels({
+			accessToken: "test-token",
+			fetchFn: async () =>
+				Response.json({
+					models: [
+						{ slug: "codex-missing", context_window: 272_000 },
+						{ slug: "codex-null", context_window: 272_000, available_access_programs: null },
+						{
+							slug: "codex-malformed",
+							context_window: 272_000,
+							available_access_programs: { cyber: "standard" },
+						},
+						{ slug: "codex-empty", context_window: 272_000, available_access_programs: { cyber: [] } },
+						{
+							slug: "codex-listed",
+							context_window: 272_000,
+							// codex-rs keeps known programs so a newer server program cannot hide the model.
+							available_access_programs: {
+								cyber: ["standard", "daybreak_blue", "future_program", "daybreak_red"],
+							},
+						},
+					],
+				}),
+		});
+
+		const programsById = Object.fromEntries(
+			(result?.models ?? []).map(model => [model.id, model.availableAccessPrograms ?? "missing"]),
+		);
+		expect(programsById).toEqual({
+			"codex-missing": "missing",
+			"codex-null": "missing",
+			"codex-malformed": "missing",
+			"codex-empty": { cyber: [] },
+			"codex-listed": { cyber: ["standard", "daybreak_blue", "daybreak_red"] },
+		});
+	});
+
 	it("floors GPT-5.6 luna/sol/terra at the 1M window when upstream omits context_window (#5705)", async () => {
 		const fetchFn: typeof fetch = Object.assign(
 			async () =>

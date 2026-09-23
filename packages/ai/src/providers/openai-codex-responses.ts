@@ -29,6 +29,7 @@ import type {
 	AssistantMessage,
 	CodexCompactionContext,
 	CodexCompactionRequestContext,
+	CodexCyberAccessProgram,
 	Context,
 	FetchImpl,
 	Model,
@@ -150,6 +151,12 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	preferWebsockets?: boolean;
 	serviceTier?: ServiceTier;
 	/**
+	 * Cyber access program requested for this turn (codex-rs
+	 * `access_programs.cyber`). Forwarded only to the first-party `openai-codex`
+	 * provider; omitted keeps the backend's automatic treatment.
+	 */
+	cyberAccessProgram?: CodexCyberAccessProgram;
+	/**
 	 * Responses Lite transport opt-in. Normal inference defaults to full
 	 * Responses; provider-native compaction explicitly follows the model's
 	 * `useResponsesLite` flag.
@@ -176,6 +183,18 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	 * swallowed and must not alter the stream.
 	 */
 	onModerationMetadata?: (metadata: unknown) => void;
+}
+
+/**
+ * `access_programs` for a ChatGPT Codex request. codex-rs forwards the cyber
+ * program only for ChatGPT-authenticated first-party requests and omits it for
+ * API-key and custom-provider requests, so any other provider gets nothing.
+ */
+export function codexAccessPrograms(
+	model: Pick<Model, "provider">,
+	program: CodexCyberAccessProgram | undefined,
+): { cyber: CodexCyberAccessProgram } | undefined {
+	return program !== undefined && model.provider === "openai-codex" ? { cyber: program } : undefined;
 }
 
 /** Raw V2 compaction body accepted by the Codex transport selector. */
@@ -1558,6 +1577,8 @@ export async function buildTransformedCodexRequestBody(
 	};
 
 	const body = await transformRequestBody(params, model, codexOptions, { developerMessages });
+	const accessPrograms = codexAccessPrograms(model, options?.cyberAccessProgram);
+	if (accessPrograms) body.access_programs = accessPrograms;
 	applyCodexStableEffort(model, body, options);
 	return body;
 }
@@ -3511,18 +3532,22 @@ function recordCodexTurnUsageDiagnostics(
 	CODEX_DEBUG && logger.debug("[codex] codex turn diagnostics", { diagnostics: state.stats.lastTurn });
 }
 
+// Per-turn request fields that may change without breaking a websocket chain.
+// codex-rs likewise ignores `access_programs` when deciding whether a request
+// extends the previous response, so a new program rides on the delta.
 const CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP = {
 	service_tier: true,
+	access_programs: true,
 };
 
 /**
  * Shape the next websocket turn's request body: when the session's strict
  * history prefix is intact and request options other than the per-turn
- * service_tier match, chain via previous_response_id + delta-only input;
- * replay the full transcript. SSE requests never chain — the HTTP endpoint's
- * request schema has no `previous_response_id` (codex-rs carries it only on
- * websocket `response.create` frames) and strict gateway validators 400 it
- * with `{"detail":"Unsupported parameter: previous_response_id"}`.
+ * service_tier and access_programs match, chain via previous_response_id +
+ * delta-only input; replay the full transcript. SSE requests never chain — the
+ * HTTP endpoint's request schema has no `previous_response_id` (codex-rs
+ * carries it only on websocket `response.create` frames) and strict gateway
+ * validators 400 it with `{"detail":"Unsupported parameter: previous_response_id"}`.
  */
 function buildCodexChainedRequestBody(
 	requestBody: RequestBody,

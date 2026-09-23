@@ -11,7 +11,7 @@
  * and OpenRouter response-cache hits across advisor calls.
  */
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
-import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { type CodexCyberAccessProgram, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
 
@@ -19,6 +19,23 @@ function timeoutSecondsToMs(value: number): number | undefined {
 	if (!Number.isFinite(value) || value < 0) return undefined;
 	if (value === 0) return 0;
 	return Math.max(1, Math.trunc(value * 1000));
+}
+
+/**
+ * `providers.openai-codex.cyberAccess` as the wire program; `auto` omits it.
+ * The `openai-codex` provider is the only one that forwards the result.
+ */
+export function codexCyberAccessProgram(settings: Settings): CodexCyberAccessProgram | undefined {
+	switch (settings.get("providers.openai-codex.cyberAccess")) {
+		case "standard":
+			return "standard";
+		case "daybreak-blue":
+			return "daybreak_blue";
+		case "daybreak-red":
+			return "daybreak_red";
+		default:
+			return undefined;
+	}
 }
 
 /**
@@ -70,6 +87,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			...streamOptions,
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
 			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
+			codexCyberAccessProgram: streamOptions?.codexCyberAccessProgram ?? codexCyberAccessProgram(settings),
 			textVerbosity: streamOptions?.textVerbosity ?? textVerbosity,
 			cacheRetention: streamOptions?.cacheRetention ?? cacheRetention,
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,

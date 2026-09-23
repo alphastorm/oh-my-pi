@@ -22,6 +22,7 @@ import { type CustomMessage, convertToLlm } from "./messages";
 import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import type { SessionManager } from "./session-manager";
+import { codexCyberAccessProgram } from "./settings-stream-fn";
 
 type NormalizableContentBlock = AssistantMessage["content"][number] | TextContent | ImageContent;
 
@@ -167,6 +168,7 @@ export class SessionProviderBoundary {
 			...options,
 			...(openrouterVariant !== undefined && { openrouterVariant }),
 			...(antigravityEndpointMode !== undefined && { antigravityEndpointMode }),
+			codexCyberAccessProgram: options.codexCyberAccessProgram ?? codexCyberAccessProgram(this.#host.settings),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
 				options.maxInFlightRequests ?? this.#host.settings.get("providers.maxInFlightRequests"),
 			),

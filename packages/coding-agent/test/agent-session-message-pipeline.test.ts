@@ -862,6 +862,25 @@ describe("AgentSession message pipeline", () => {
 		);
 	});
 
+	it("applies the Codex cyber access setting to side requests unless the caller chose a program", () => {
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"providers.openai-codex.cyberAccess": "daybreak-red",
+			}),
+			modelRegistry: {} as never,
+		});
+		sessions.push(session);
+
+		expect(session.prepareSimpleStreamOptions({}, "openai-codex").codexCyberAccessProgram).toBe("daybreak_red");
+		expect(
+			session.prepareSimpleStreamOptions({ codexCyberAccessProgram: "standard" }, "openai-codex")
+				.codexCyberAccessProgram,
+		).toBe("standard");
+	});
+
 	it("emits message_update to session listeners before slow extension handlers finish", async () => {
 		const { promise, resolve } = Promise.withResolvers<void>();
 		const extensionEmit = vi.fn(async (event: { type: string }) => {

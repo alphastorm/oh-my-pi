@@ -470,6 +470,28 @@ describe("async speculative compaction", () => {
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("summary 2");
 	});
 
+	it("forwards the Codex cyber access setting on speculative and threshold compaction", async () => {
+		maintenanceSettings.override("providers.openai-codex.cyberAccess", "daybreak-blue");
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		sessionManager.appendResetBoundary();
+		appendSummarizableConversation();
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+
+		// Speculation runs through the fallback-model path, the threshold pass through the auto-compaction loop.
+		expect(compactSpy.mock.calls.map(call => call[5]?.codexCyberAccessProgram)).toEqual([
+			"daybreak_blue",
+			"daybreak_blue",
+		]);
+	});
+
 	it("does not start speculative work when async compaction is disabled", () => {
 		maintenance = createMaintenance({ asyncEnabled: false });
 		const compactSpy = vi.spyOn(compactionModule, "compact");

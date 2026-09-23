@@ -139,6 +139,14 @@ export type CacheRetention = "none" | "short" | "long";
  */
 export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority";
 
+/**
+ * Cyber treatment requested for a ChatGPT-authenticated Codex turn, sent as
+ * `access_programs.cyber` (codex-rs `CyberAccessProgram`). The backend owns
+ * authorization and model-tier restrictions; omitting it keeps its automatic
+ * treatment.
+ */
+export type CodexCyberAccessProgram = "standard" | "daybreak_blue" | "daybreak_red";
+
 /** Provider families that expose an independent service-tier knob. */
 export type ServiceTierFamily = "openai" | "anthropic" | "google";
 
@@ -713,6 +721,12 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	cachedContent?: string;
 	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
+	/**
+	 * Cyber access program for OpenAI Codex (ChatGPT) requests, sent as
+	 * `access_programs.cyber`. Only the first-party `openai-codex` provider
+	 * forwards it; every other provider ignores it.
+	 */
+	codexCyberAccessProgram?: CodexCyberAccessProgram;
 	/**
 	 * Anthropic `server-side-fallback-2026-06-01` fallback chain (top-level
 	 * `fallbacks` request field). Opt-in ONLY — leaving this undefined is

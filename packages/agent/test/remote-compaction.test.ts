@@ -1127,6 +1127,7 @@ describe("Responses Lite remote compaction", () => {
 		client_metadata?: unknown;
 		reasoning?: Record<string, unknown>;
 		include?: string[];
+		access_programs?: unknown;
 	}
 
 	interface CapturedLiteExchange {
@@ -1319,6 +1320,49 @@ describe("Responses Lite remote compaction", () => {
 			expect(captured?.body.reasoning?.effort).toBe("none");
 		},
 	);
+
+	test("forwards the cyber access program on V2 compaction but not to a configured V1 endpoint", async () => {
+		// Codex reaches `/responses/compact` only through an explicitly configured endpoint.
+		const model = makeCodexLiteModel({
+			remoteCompaction: {
+				enabled: true,
+				api: "openai-codex-responses",
+				v2StreamingEnabled: true,
+				endpoint: "https://compact.example/v1/responses/compact",
+			},
+		});
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: true },
+		};
+		const v2Bodies: Array<Record<string, unknown>> = [];
+		const v1Bodies: Array<Record<string, unknown>> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			if (new URL(String(input)).pathname.endsWith("/responses/compact")) {
+				v1Bodies.push(body);
+				return Response.json({ output: [{ type: "compaction", encrypted_content: "enc-v1" }] });
+			}
+			v2Bodies.push(body);
+			return new Response("V2 rejected", { status: 400, statusText: "Bad Request" });
+		};
+
+		await compact(preparation, model, CODEX_RESIDENCY_TOKEN, undefined, undefined, {
+			fetch: fetchMock,
+			codexCyberAccessProgram: "daybreak_blue",
+		});
+
+		expect(v2Bodies.map(body => body.access_programs)).toEqual([{ cyber: "daybreak_blue" }]);
+		// codex-rs never sent the program to `/responses/compact`.
+		expect(v1Bodies).toHaveLength(1);
+		expect(v1Bodies[0]).not.toHaveProperty("access_programs");
+	});
 
 	test("V2 compaction isolates its Lite WebSocket from the full Responses session", async () => {
 		const providerSessionState = new Map<string, ProviderSessionState>();
@@ -1650,6 +1694,53 @@ describe("Responses Lite remote compaction", () => {
 			turnIds.push(turnMetadata.turn_id);
 		}
 		expect(new Set(turnIds).size).toBe(1);
+	});
+
+	test("local Codex summaries carry the session's cyber access program", async () => {
+		const model = makeCodexLiteModel();
+		const captured: CapturedLiteExchange[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			captured.push(captureStreamLite(init));
+			const item = { type: "message", id: "msg_summary", role: "assistant" };
+			return sseResponse([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...item, status: "in_progress", content: [] },
+				},
+				{ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "local summary" },
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { ...item, status: "completed", content: [{ type: "output_text", text: "local summary" }] },
+				},
+				{
+					type: "response.completed",
+					response: { status: "completed", usage: { input_tokens: 8, output_tokens: 2, total_tokens: 10 } },
+				},
+			]);
+		};
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: false, remoteStreamingV2Enabled: false },
+		};
+
+		await compact(preparation, model, CODEX_RESIDENCY_TOKEN, undefined, undefined, {
+			fetch: fetchMock,
+			codexCyberAccessProgram: "daybreak_red",
+		});
+
+		// Summary and short summary: every local oneshot of the compaction.
+		expect(captured.map(exchange => exchange.body.access_programs)).toEqual([
+			{ cyber: "daybreak_red" },
+			{ cyber: "daybreak_red" },
+		]);
 	});
 
 	test("local Codex compaction isolates and closes transient websocket sessions", async () => {

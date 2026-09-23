@@ -163,6 +163,32 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(long.calls[1]?.options?.cacheRetention).toBe("none");
 	});
 
+	it("maps providers.openai-codex.cyberAccess to the wire program, leaves auto unset, and lets callers override", () => {
+		const programFor = (value: "auto" | "standard" | "daybreak-blue" | "daybreak-red") => {
+			const { fn: base, calls } = captureBase();
+			createSettingsAwareStreamFn(Settings.isolated({ "providers.openai-codex.cyberAccess": value }), base)(
+				stubCodexModel,
+				stubContext,
+				undefined,
+			);
+			return calls[0]?.options?.codexCyberAccessProgram;
+		};
+		expect([
+			programFor("auto"),
+			programFor("standard"),
+			programFor("daybreak-blue"),
+			programFor("daybreak-red"),
+		]).toEqual([undefined, "standard", "daybreak_blue", "daybreak_red"]);
+
+		const { fn: base, calls } = captureBase();
+		createSettingsAwareStreamFn(Settings.isolated({ "providers.openai-codex.cyberAccess": "daybreak-red" }), base)(
+			stubCodexModel,
+			stubContext,
+			{ codexCyberAccessProgram: "standard" },
+		);
+		expect(calls[0]?.options?.codexCyberAccessProgram).toBe("standard");
+	});
+
 	it("lets caller-supplied options override the session settings", () => {
 		const settings = Settings.isolated({
 			"providers.openrouterVariant": "floor",

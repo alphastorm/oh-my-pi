@@ -10,6 +10,7 @@ import {
 	type ApiKey,
 	type AssistantMessage,
 	type CodexCompactionContext,
+	type CodexCyberAccessProgram,
 	type Context,
 	Effort,
 	type FetchImpl,
@@ -702,6 +703,11 @@ export interface SummaryOptions {
 	preferWebsockets?: boolean;
 	/** Classification shared by every provider request in this logical compaction. */
 	codexCompaction?: CodexCompactionContext;
+	/**
+	 * Cyber access program of the session, forwarded on Codex V2 compaction and
+	 * local summarization requests. Legacy `/responses/compact` never carries it.
+	 */
+	codexCyberAccessProgram?: CodexCyberAccessProgram;
 	/** Provider-visible tools for remote compaction transports that replay native tool history. */
 	tools?: Tool[];
 	/** Optional fetch implementation threaded into remote compaction calls. */
@@ -1006,6 +1012,7 @@ async function summarizeConversationWindow(
 			promptCacheKey: options?.promptCacheKey,
 			providerSessionState: options?.providerSessionState,
 			codexCompaction: localCodexCompaction(options),
+			codexCyberAccessProgram: options?.codexCyberAccessProgram,
 		},
 		{
 			telemetry: options?.telemetry,
@@ -1220,6 +1227,7 @@ async function generateShortSummary(
 			promptCacheKey: options?.promptCacheKey,
 			providerSessionState: options?.providerSessionState,
 			codexCompaction: localCodexCompaction(options),
+			codexCyberAccessProgram: options?.codexCyberAccessProgram,
 		},
 		{
 			telemetry: options?.telemetry,
@@ -1609,6 +1617,7 @@ export async function compact(
 		providerSessionState: options?.providerSessionState,
 		preferWebsockets: options?.preferWebsockets,
 		codexCompaction: options?.codexCompaction,
+		codexCyberAccessProgram: options?.codexCyberAccessProgram,
 		tools: options?.tools,
 		fetch: options?.fetch,
 		completeImpl: options?.completeImpl,
@@ -1682,6 +1691,7 @@ export async function compact(
 					sessionId: summaryOptions.sessionId,
 					promptCacheKey: summaryOptions.promptCacheKey,
 					providerSessionState: summaryOptions.providerSessionState,
+					cyberAccessProgram: summaryOptions.codexCyberAccessProgram,
 					codexCompaction: createOpenAICodexCompactionRequestContext({
 						context: summaryOptions.codexCompaction,
 						implementation: "responses_compaction_v2",
@@ -2080,6 +2090,7 @@ async function generateTurnPrefixSummary(
 			promptCacheKey: options?.promptCacheKey,
 			providerSessionState: options?.providerSessionState,
 			codexCompaction: localCodexCompaction(options),
+			codexCyberAccessProgram: options?.codexCyberAccessProgram,
 		},
 		{
 			telemetry: options?.telemetry,

@@ -219,7 +219,7 @@ export function sanitizeOpenAIResponsesHistoryItemsForReplay(
 	items: Array<Record<string, unknown>>,
 	options: OpenAIResponsesReplaySanitizeOptions = {},
 ): ResponseInput {
-	const supportsImageDetailOriginal = options.supportsImageDetailOriginal !== false;
+	const supportsImageDetailOriginal = options.supportsImageDetailOriginal === true;
 	const computerLinkedReasoningItems =
 		options.supportsComputerUse === false
 			? undefined

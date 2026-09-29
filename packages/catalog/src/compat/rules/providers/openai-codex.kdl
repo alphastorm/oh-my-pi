@@ -7,8 +7,6 @@ provider "openai-codex" {
 		image "openai-codex-responses"
 	}
 	web-search "codex"
-	// The subscription backend accepts native-resolution image inputs.
-	supports-image-detail-original #true
 
 	seed api="openai-codex-responses" base-url="https://chatgpt.com/backend-api" bundle="always" {
 		// Label only: the Codex backend ignores `tool.model` and runs gpt-image-2-codex.

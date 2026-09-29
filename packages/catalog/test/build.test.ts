@@ -363,6 +363,14 @@ describe("Responses native-resolution image compatibility", () => {
 		["official OpenAI", "openai", "openai-responses", "https://api.openai.com/v1", true],
 		["OpenAI host with a custom provider name", "custom", "openai-responses", "https://api.openai.com/v1", true],
 		["Codex subscription", "openai-codex", "openai-codex-responses", "https://chatgpt.com/backend-api", true],
+		["Codex legacy backend", "openai-codex", "openai-codex-responses", "https://chat.openai.com/backend-api", true],
+		[
+			"Codex routed through a custom host",
+			"openai-codex",
+			"openai-codex-responses",
+			"http://127.0.0.1:8080/v1",
+			false,
+		],
 		["custom Codex proxy", "cc-switch", "openai-codex-responses", "http://127.0.0.1:8080/v1", false],
 		["Azure runtime endpoint", "azure", "azure-openai-responses", "", true],
 		["Azure host", "custom", "openai-responses", "https://resource.openai.azure.com/openai/v1", true],
@@ -376,7 +384,7 @@ describe("Responses native-resolution image compatibility", () => {
 	it.each([
 		["custom opt-in", "custom", "openai-responses", "http://127.0.0.1:8080/v1", true],
 		["OpenAI opt-out", "openai", "openai-responses", "https://api.openai.com/v1", false],
-		["Codex wire-rule opt-out", "openai-codex", "openai-codex-responses", "https://chatgpt.com/backend-api", false],
+		["Codex opt-out", "openai-codex", "openai-codex-responses", "https://chatgpt.com/backend-api", false],
 		["xAI wire-rule opt-in", "xai-oauth", "openai-responses", "https://api.x.ai/v1", true],
 	] as const)(
 		"lets explicit image-detail compat win over detection and wire rules: %s",

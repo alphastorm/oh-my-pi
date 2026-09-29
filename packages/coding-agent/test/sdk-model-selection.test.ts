@@ -1480,6 +1480,112 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	function buildResumeOptions() {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendModelChange("missing-provider/missing-model");
+		return {
+			...buildSessionOptions(""),
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
+			sessionManager,
+			settings: Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } }),
+			extensions: [],
+		};
+	}
+
+	test("rejects a headless resume instead of substituting the settings default", async () => {
+		await expect(createAgentSession(buildResumeOptions())).rejects.toThrow(
+			"Could not restore model missing-provider/missing-model",
+		);
+	});
+
+	test("rejects a headless resume instead of selecting the first available model", async () => {
+		await expect(createAgentSession({ ...buildResumeOptions(), settings: Settings.isolated() })).rejects.toThrow(
+			"Could not restore model missing-provider/missing-model",
+		);
+	});
+
+	test("rejects an interactive resume when retry model fallback is disabled", async () => {
+		await expect(
+			createAgentSession({
+				...buildResumeOptions(),
+				hasUI: true,
+				settings: Settings.isolated({
+					modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+					retry: { modelFallback: false },
+				}),
+			}),
+		).rejects.toThrow("Could not restore model missing-provider/missing-model");
+	});
+
+	test("rejects a resume when tool UI is available but startup fallback warnings are not", async () => {
+		await expect(
+			createAgentSession({ ...buildResumeOptions(), hasUI: true, allowSessionModelFallback: false }),
+		).rejects.toThrow("Could not restore model missing-provider/missing-model");
+	});
+
+	test("keeps the fallback warning and settings default for interactive resume", async () => {
+		const { session, modelFallbackMessage } = await createAgentSession({ ...buildResumeOptions(), hasUI: true });
+		try {
+			expect(session.model?.provider).toBe("anthropic");
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+			expect(modelFallbackMessage).toContain("Could not restore model missing-provider/missing-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test.each(["model", "modelPattern"] as const)(
+		"honors an explicit %s instead of the unavailable saved model",
+		async selection => {
+			const options = buildResumeOptions();
+			const model = options.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled anthropic default model");
+			const { session, modelFallbackMessage } = await createAgentSession({
+				...options,
+				...(selection === "model" ? { model } : { modelPattern: "anthropic/claude-sonnet-4-5" }),
+			});
+			try {
+				expect(session.model?.provider).toBe("anthropic");
+				expect(session.model?.id).toBe("claude-sonnet-4-5");
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
+
+	test("restores an extension-discovered session model before rejecting headless resume", async () => {
+		const options = buildResumeOptions();
+		options.sessionManager.appendModelChange("runtime-provider/cached-runtime-model");
+		const discoveryStarted = Promise.withResolvers<void>();
+		const finishDiscovery = Promise.withResolvers<void>();
+		const extension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				...dynamicOnlyProviderConfig,
+				fetchDynamicModels: async context => {
+					discoveryStarted.resolve();
+					await finishDiscovery.promise;
+					return dynamicOnlyProviderConfig.fetchDynamicModels!(context);
+				},
+			});
+		};
+		const startup = createAgentSession({ ...options, extensions: [extension] });
+		await discoveryStarted.promise;
+		finishDiscovery.resolve();
+		const { session, modelFallbackMessage } = await startup;
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("cached-runtime-model");
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("restores a discovery-backed session model instead of falling back to the default role", async () => {
 		// Regression: on `omp --resume`, the session-model restore probed
 		// candidates only against the static+cached catalog. A discovery-backed

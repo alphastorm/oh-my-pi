@@ -797,6 +797,16 @@ export interface CreateAgentSessionOptions {
 	/** Whether UI is available (enables interactive tools like ask). Default: false */
 	hasUI?: boolean;
 	/**
+	 * When a resumed session's saved models cannot be restored even after
+	 * discovery, allow switching to the settings default with a warning in
+	 * `modelFallbackMessage`. Applies only when `hasUI` is true and
+	 * `retry.modelFallback` is on; otherwise `createAgentSession` throws
+	 * `Could not restore model <provider/id>`. Hosts whose `hasUI` only enables
+	 * tool dialogs and cannot show the warning (rpc-ui) set this to false.
+	 * Default: true.
+	 */
+	allowSessionModelFallback?: boolean;
+	/**
 	 * A human can answer synchronous prompts even without a terminal UI (e.g. an
 	 * ACP client rendering elicitation forms). Enables `ask` without enabling
 	 * TUI-only session behavior such as eager LSP warmup. Default: `hasUI`.
@@ -2702,23 +2712,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!restoreSessionModel()) {
 				// The saved candidates weren't in the static+cached catalog. If any
 				// belongs to a discovery-backed provider that hasn't been fetched
-				// yet (models.yml `discovery:` — openai-models-list/litellm/proxy/…),
+				// yet (models.yml `discovery:` or extension `fetchDynamicModels`),
 				// trigger a cache-aware, provider-scoped discovery pass and retry
 				// before resume silently downgrades to the default role. The
 				// registry coalesces this with any matching request already running
 				// in the SDK's startup background refresh.
-				const discoverableProviders = new Set(modelRegistry.getDiscoverableProviders());
 				const candidateProviders = new Set<string>();
-				if (discoverableProviders.size > 0) {
-					for (const sessionModelStr of sessionModelStrings.slice(0, sessionRetryLimit)) {
-						const parsedModel = parseModelString(sessionModelStr, {
-							allowMaxSuffix: true,
-							allowAutoAlias: true,
-							isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-						});
-						if (parsedModel && discoverableProviders.has(parsedModel.provider)) {
-							candidateProviders.add(parsedModel.provider);
-						}
+				const disabledProviders = disabledProviderIds(settings);
+				for (const sessionModelStr of sessionModelStrings.slice(0, sessionRetryLimit)) {
+					const parsedModel = parseModelString(sessionModelStr, {
+						allowMaxSuffix: true,
+						allowAutoAlias: true,
+						isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+					});
+					const provider = parsedModel && modelRegistry.getDiscoveryProviderId(parsedModel.provider);
+					if (provider && !disabledProviders.has(provider)) {
+						candidateProviders.add(provider);
 					}
 				}
 				if (candidateProviders.size > 0) {
@@ -2731,6 +2740,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					restoreSessionModel();
 				}
 			}
+		}
+		// Exhaust persisted candidates (including configured and extension discovery)
+		// before permitting a settings-default or first-available substitution.
+		if (
+			sessionModelStrings.length > 0 &&
+			restoredSessionModelIndex < 0 &&
+			(!options.hasUI || options.allowSessionModelFallback === false || !cfgRetryModelFallback.get(settings))
+		) {
+			throw new Error(`Could not restore model ${sessionModelStrings[0]}`);
 		}
 		// Resolve deferred --model/subagent patterns now that extension models are
 		// registered. Use the same CLI resolver as the immediate path so bare role

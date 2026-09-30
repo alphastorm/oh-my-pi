@@ -1586,6 +1586,141 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	/** A fresh persisted session on the settings default, ready to switch at runtime. */
+	function buildSwitchOptions() {
+		return {
+			...buildResumeOptions(),
+			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "sessions")),
+		};
+	}
+
+	/** A session file whose only saved model is `model`, holding one user turn. */
+	async function writeSavedModelSession(model: string): Promise<string> {
+		const sessionFile = path.join(tempDir, `saved-${Snowflake.next()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id: `saved-${Snowflake.next()}`, timestamp, cwd: tempDir },
+				{ type: "model_change", id: "model", parentId: null, timestamp, model, role: "default" },
+				{
+					type: "message",
+					id: "user",
+					parentId: "model",
+					timestamp,
+					message: { role: "user", content: "Remember ZEBRA-42.", timestamp: Date.parse(timestamp) },
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		return sessionFile;
+	}
+
+	test.each([
+		["headless", {}],
+		["tool-UI-only", { hasUI: true, allowSessionModelFallback: false }],
+		[
+			"retry-fallback-disabled UI",
+			{
+				hasUI: true,
+				settings: Settings.isolated({
+					modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+					retry: { modelFallback: false },
+				}),
+			},
+		],
+	] as const)("keeps a %s session when switching to one whose saved model is unavailable", async (_host, host) => {
+		const { session } = await createAgentSession({ ...buildSwitchOptions(), ...host });
+		try {
+			const previousFile = session.sessionFile;
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			await expect(session.switchSession(target)).rejects.toThrow(
+				"Could not restore model missing-provider/missing-model",
+			);
+			expect(session.sessionFile).toBe(previousFile);
+			expect(session.messages).toEqual([]);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("switches a UI session to an unavailable saved model with a restore warning", async () => {
+		const { session } = await createAgentSession({ ...buildSwitchOptions(), hasUI: true });
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(`${event.level}: ${event.message}`);
+		});
+		try {
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			await expect(session.switchSession(target)).resolves.toBe(true);
+			expect(session.sessionFile).toBe(target);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+			const warning = "Could not restore model missing-provider/missing-model. Using anthropic/claude-sonnet-4-5";
+			expect(notices).toEqual([`warning: ${warning}`]);
+
+			// A host that re-renders after switching takes the warning itself.
+			const reported: string[] = [];
+			const next = await writeSavedModelSession("missing-provider/missing-model");
+			await session.switchSession(next, { onModelFallback: message => reported.push(message) });
+			expect(reported).toEqual([warning]);
+			expect(notices).toHaveLength(1);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("restores an extension-discovered model when switching before discovery ran", async () => {
+		// UI startup defers runtime discovery until after the first paint, so
+		// `/resume` can run before the provider's models exist in the registry.
+		const { session } = await createAgentSession({
+			...buildSwitchOptions(),
+			hasUI: true,
+			extensions: [dynamicOnlyProviderExtension],
+		});
+		try {
+			const target = await writeSavedModelSession("runtime-provider/cached-runtime-model");
+			await expect(session.switchSession(target)).resolves.toBe(true);
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("cached-runtime-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("binds an explicit switch model and restores it on the next switch", async () => {
+		const { session } = await createAgentSession(buildSwitchOptions());
+		try {
+			const settingsDefault = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+			const explicit = session.modelRegistry.find("anthropic", "claude-sonnet-4-6");
+			if (!settingsDefault || !explicit) throw new Error("Expected bundled anthropic Sonnet models");
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			await expect(session.switchSession(target, { model: explicit })).resolves.toBe(true);
+			expect(session.model?.id).toBe("claude-sonnet-4-6");
+
+			// The target recorded the explicit model, so a later switch restores it.
+			await session.newSession();
+			await session.setModel(settingsDefault);
+			await expect(session.switchSession(target)).resolves.toBe(true);
+			expect(session.model?.id).toBe("claude-sonnet-4-6");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("keeps the current model for a replica switch that mirrors another host's model", async () => {
+		const { session } = await createAgentSession(buildSwitchOptions());
+		try {
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			await expect(session.switchSession(target, { keepModel: true })).resolves.toBe(true);
+			expect(session.sessionFile).toBe(target);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("restores a discovery-backed session model instead of falling back to the default role", async () => {
 		// Regression: on `omp --resume`, the session-model restore probed
 		// candidates only against the static+cached catalog. A discovery-backed

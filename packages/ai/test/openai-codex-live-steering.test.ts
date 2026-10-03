@@ -351,7 +351,7 @@ describe("codex live steering", () => {
 				});
 				queueMicrotask(() => {
 					socket.readyState = ScriptedWebSocket.CLOSED;
-					socket.onclose?.({ code: 1000 } as CloseEvent);
+					socket.onclose?.(new CloseEvent("close", { code: 1000 }));
 				});
 				return;
 			}
@@ -416,7 +416,7 @@ describe("codex live steering", () => {
 				});
 				queueMicrotask(() => {
 					socket.readyState = ScriptedWebSocket.CLOSED;
-					socket.onclose?.({ code: 1000 } as CloseEvent);
+					socket.onclose?.(new CloseEvent("close", { code: 1000 }));
 				});
 				return;
 			}

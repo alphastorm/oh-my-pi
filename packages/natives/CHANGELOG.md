@@ -27,6 +27,7 @@
 - Fixed strings passed to native functions sometimes losing their last characters when they ended in non-ASCII text (seen as `highlightCode` dropping the end of long lines) ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
 - Fixed `renderMermaidAscii` hanging and running out of memory on an `xychart` axis whose range is finer than floating-point precision ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
 - Fixed `getWorkProfile()` attributing async work to the wrong region or dropping it ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed building the native addon with `cargo` on macOS, which failed with `E0277` in `process.terminate` and `process.wait_for_exit` because the kqueue exit wait held a non-`Send` change record across an await ([#14460](https://github.com/can1357/oh-my-pi/pull/14460) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.6.2] - 2026-10-04
 

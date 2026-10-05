@@ -505,18 +505,24 @@ mod platform {
 			}
 			// SAFETY: `kq` is a fresh descriptor nothing else owns.
 			let kq = unsafe { OwnedFd::from_raw_fd(kq) };
-			let change = libc::kevent {
-				ident:  self.pid as libc::uintptr_t,
-				filter: libc::EVFILT_PROC,
-				flags:  libc::EV_ADD | libc::EV_ONESHOT,
-				fflags: libc::NOTE_EXIT,
-				data:   0,
-				udata:  ptr::null_mut(),
-			};
-			// SAFETY: `change` is one initialized change record; with no event
-			// buffer the call only registers it and the null timeout is unused.
-			let registered = unsafe {
-				libc::kevent(kq.as_raw_fd(), &raw const change, 1, ptr::null_mut(), 0, ptr::null())
+			// The change record holds a raw `udata` pointer, so it is not `Send`.
+			// Keep it in this block: taking its address keeps its storage alive
+			// for the rest of its scope, and a record still alive at the await
+			// below would make this future, and the napi tasks awaiting it, `!Send`.
+			let registered = {
+				let change = libc::kevent {
+					ident:  self.pid as libc::uintptr_t,
+					filter: libc::EVFILT_PROC,
+					flags:  libc::EV_ADD | libc::EV_ONESHOT,
+					fflags: libc::NOTE_EXIT,
+					data:   0,
+					udata:  ptr::null_mut(),
+				};
+				// SAFETY: `change` is one initialized change record; with no event
+				// buffer the call only registers it and the null timeout is unused.
+				unsafe {
+					libc::kevent(kq.as_raw_fd(), &raw const change, 1, ptr::null_mut(), 0, ptr::null())
+				}
 			};
 			if registered < 0 {
 				let err = std::io::Error::last_os_error();

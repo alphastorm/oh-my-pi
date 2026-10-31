@@ -125,6 +125,7 @@ import {
 	cfgCompactionAutoContinue,
 	cfgCompactionEnabled,
 	cfgCompactionMethodOrder,
+	cfgCompactionShakeThresholdPercent,
 	cfgContextPromotionEnabled,
 	cfgSnapcompactShape,
 } from "./context-settings";
@@ -321,6 +322,18 @@ const PRUNE_CACHE_WARM_SUFFIX_TOKENS = 8_000;
  * still-warm prefix is busted by the flush. 90 min leaves margin over the 1h TTL.
  */
 const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
+
+/** Match the per-turn prune protect window: keep the agent's working context intact. */
+const SHAKE_TIER_PROTECT_TOKENS = DEFAULT_PRUNE_CONFIG.protectTokens;
+/** Each cache rewrite must reclaim this share of the trigger; also the hysteresis between passes. */
+const SHAKE_TIER_MIN_SAVINGS_SHARE = 0.1;
+
+interface ShakeTierDue {
+	config: ShakeConfig;
+	tierTokens: number;
+	thresholdTokens: number;
+	contextTokens: number;
+}
 
 /** Share of the room under the compaction trigger a snapcompact archive may fill; the rest is left for new turns. */
 const SNAPCOMPACT_ARCHIVE_SHARE = 0.5;
@@ -698,6 +711,17 @@ export class SessionMaintenance {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
 
+	#elideShakeConfig(base: ShakeConfig, latestCompaction: CompactionEntry | null): ShakeConfig {
+		return this.#withPlanProtection({
+			...base,
+			// Skip entries summarized away by the latest compaction — shaking them
+			// only churns persisted history with no prompt/cache effect. The cut is
+			// unconditional on the wire (see `buildSessionContext`), so a compaction
+			// the active model cannot replay still hides its prefix from the prompt.
+			keepBoundaryId: latestCompaction?.firstKeptEntryId,
+		});
+	}
+
 	/**
 	 * Durably commit a prune pass, restoring the blanked results when the rewrite
 	 * fails so live context never diverges from the history its derived state
@@ -956,14 +980,7 @@ export class SessionMaintenance {
 		assertCurrent();
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
-		const config = this.#withPlanProtection({
-			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
-			// Skip entries summarized away by the latest compaction — shaking them
-			// only churns persisted history with no prompt/cache effect. The cut is
-			// unconditional on the wire (see `buildSessionContext`), so a compaction
-			// the active model cannot replay still hides its prefix from the prompt.
-			keepBoundaryId: latestCompaction?.firstKeptEntryId,
-		});
+		const config = this.#elideShakeConfig(opts.config ?? AGGRESSIVE_SHAKE_CONFIG, latestCompaction);
 		let regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
 		if (opts.toolResultsOnly) regions = regions.filter(region => region.kind === "toolResult");
 		if (regions.length === 0) {
@@ -2732,6 +2749,122 @@ export class SessionMaintenance {
 		return tokens;
 	}
 
+	#shakeTierDue(contextTokens: number, contextWindow: number, settings: CompactionSettings): ShakeTierDue | undefined {
+		const percent = cfgCompactionShakeThresholdPercent.get(this.#host.settings);
+		if (!(percent > 0 && percent < 100)) return undefined;
+		if (contextWindow <= 0 || this.#host.isDisposed()) return undefined;
+		if (
+			!settings.enabled ||
+			this.#usesExperimentalContextManagement() ||
+			!resolveCompactionMethodOrder(settings.methodOrder).includes("shake")
+		)
+			return undefined;
+		// An in-flight summarizer reads the branch's message objects by reference.
+		if (this.isCompacting || this.#host.isGeneratingHandoff() || this.#speculation !== undefined) return undefined;
+		if (shouldCompact(contextTokens, contextWindow, settings)) return undefined;
+		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
+		const tierTokens = Math.floor((thresholdTokens * percent) / 100);
+		if (contextTokens < tierTokens) return undefined;
+		return {
+			config: {
+				...DEFAULT_SHAKE_CONFIG,
+				protectTokens: Math.max(DEFAULT_SHAKE_CONFIG.protectTokens, SHAKE_TIER_PROTECT_TOKENS),
+				minSavings: Math.max(
+					DEFAULT_SHAKE_CONFIG.minSavings,
+					Math.floor(thresholdTokens * SHAKE_TIER_MIN_SAVINGS_SHARE),
+				),
+			},
+			tierTokens,
+			thresholdTokens,
+			contextTokens,
+		};
+	}
+
+	/** Run only a recoverable elision below the trigger; never escalate or schedule a continuation. */
+	async #runShakeTier(
+		due: ShakeTierDue,
+		opts: {
+			generation: number;
+			isLive?: () => boolean;
+			persist?: () => Promise<boolean>;
+			detachPostCommit: boolean;
+		},
+	): Promise<{ tokensFreed: number } | undefined> {
+		const branch = this.#host.sessionManager.getBranch();
+		// Persisting a new turn only ages existing regions further out of the
+		// protect window. Pre-check first so no-op boundaries neither wait on the
+		// journal nor flash a lifecycle loader.
+		if (
+			collectShakeRegions(
+				branch,
+				this.#tokenizer,
+				this.#elideShakeConfig(due.config, getLatestCompactionEntry(branch)),
+			).length === 0
+		)
+			return undefined;
+		const isCurrent = () =>
+			!this.#host.isDisposed() && this.#host.promptGeneration() === opts.generation && (opts.isLive?.() ?? true);
+		if (opts.persist && !(await opts.persist())) return undefined;
+		if (!isCurrent() || this.isCompacting || this.#host.isGeneratingHandoff()) return undefined;
+
+		const controller = new AbortController();
+		this.#autoCompactionAbortController = controller;
+		try {
+			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason: "threshold", action: "shake" }, false);
+			const result = await this.shake("elide", {
+				config: due.config,
+				signal: controller.signal,
+				isCurrent,
+				requireArtifact: true,
+			});
+			const reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
+			await this.#emitLifecycleEvent(
+				{
+					type: "auto_compaction_end",
+					action: "shake",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					skipped: !reclaimed,
+				},
+				opts.detachPostCommit,
+			);
+			logger.debug("Shake tier ran below the compaction threshold", {
+				contextTokens: due.contextTokens,
+				tierTokens: due.tierTokens,
+				thresholdTokens: due.thresholdTokens,
+				tokensFreed: result.tokensFreed,
+				toolResultsDropped: result.toolResultsDropped,
+				blocksDropped: result.blocksDropped,
+				artifactId: result.artifactId,
+			});
+			return { tokensFreed: reclaimed ? result.tokensFreed : 0 };
+		} catch (error) {
+			const aborted = controller.signal.aborted || error instanceof CompactionCancelledError;
+			const errorMessage = aborted
+				? undefined
+				: `Shake tier failed: ${error instanceof Error ? error.message : String(error)}`;
+			await this.#emitLifecycleEvent(
+				{
+					type: "auto_compaction_end",
+					action: "shake",
+					result: undefined,
+					aborted,
+					willRetry: false,
+					...(aborted ? {} : { skipped: false, errorMessage }),
+				},
+				opts.detachPostCommit,
+			);
+			if (errorMessage) logger.warn(errorMessage);
+			// shake may have restored and rebuilt messages after a failed rewrite.
+			return { tokensFreed: 0 };
+		} finally {
+			if (this.#autoCompactionAbortController === controller) {
+				this.#autoCompactionAbortController = undefined;
+			}
+		}
+	}
+
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
@@ -2742,7 +2875,16 @@ export class SessionMaintenance {
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
 		this.#midTurnDeadEndPendingPrePrompt = undefined;
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
-			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
+			const tier = this.#shakeTierDue(contextTokens, contextWindow, compactionSettings);
+			const tierFreed = tier
+				? ((
+						await this.#runShakeTier(tier, {
+							generation: this.#host.promptGeneration(),
+							detachPostCommit: false,
+						})
+					)?.tokensFreed ?? 0)
+				: 0;
+			this.maybeStartSpeculativeCompaction(Math.max(0, contextTokens - tierFreed), contextWindow);
 			return;
 		}
 		if (pendingMidTurnDeadEnd !== undefined) {
@@ -2798,6 +2940,14 @@ export class SessionMaintenance {
 			preparedContextTokens: this.#estimateStoredContextTokens(),
 			phase: "pre_turn",
 		});
+	}
+
+	#adoptAgentMessages(activeMessages: AgentMessage[]): void {
+		const messages = this.#host.agent.state.messages;
+		if (messages !== activeMessages) {
+			activeMessages.splice(0, activeMessages.length, ...messages);
+			invalidateConvertToLlmArrayCache(activeMessages);
+		}
 	}
 
 	/**
@@ -2859,11 +3009,7 @@ export class SessionMaintenance {
 				this.#midTurnDeadEndPendingPrePrompt = null;
 			}
 			if (signal?.aborted) return;
-			const compactedMessages = this.#host.agent.state.messages;
-			if (compactedMessages !== activeMessages) {
-				activeMessages.splice(0, activeMessages.length, ...compactedMessages);
-				invalidateConvertToLlmArrayCache(activeMessages);
-			}
+			this.#adoptAgentMessages(activeMessages);
 			return;
 		}
 
@@ -2900,7 +3046,20 @@ export class SessionMaintenance {
 			this.#midTurnDeadEndPendingPrePrompt = undefined;
 		}
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
-			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
+			let tierFreed = 0;
+			const tier = this.#shakeTierDue(contextTokens, contextWindow, compactionSettings);
+			if (tier) {
+				const outcome = await this.#runShakeTier(tier, {
+					generation: this.#host.promptGeneration(),
+					isLive: () => signal?.aborted !== true,
+					persist: persistedDeadEnd ? undefined : () => this.#host.persistTurnMessagesForMidRunCompaction(context),
+					detachPostCommit: true,
+				});
+				if (signal?.aborted) return;
+				if (outcome) this.#adoptAgentMessages(activeMessages);
+				tierFreed = outcome?.tokensFreed ?? 0;
+			}
+			this.maybeStartSpeculativeCompaction(Math.max(0, contextTokens - tierFreed), contextWindow);
 			return;
 		}
 		// Grace band: keep the tool loop moving while a background speculation
@@ -2949,11 +3108,7 @@ export class SessionMaintenance {
 		}
 
 		if (signal?.aborted) return;
-		const compactedMessages = this.#host.agent.state.messages;
-		if (compactedMessages !== activeMessages) {
-			activeMessages.splice(0, activeMessages.length, ...compactedMessages);
-			invalidateConvertToLlmArrayCache(activeMessages);
-		}
+		this.#adoptAgentMessages(activeMessages);
 		logger.debug("Mid-run compaction ran between provider calls", {
 			contextTokens,
 			contextWindow,
@@ -3531,7 +3686,11 @@ export class SessionMaintenance {
 				model: `${assistantMessage.provider}/${assistantMessage.model}`,
 			});
 		} else {
-			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
+			const tier = this.#shakeTierDue(postMaintenanceContextTokens, contextWindow, compactionSettings);
+			const tierFreed = tier
+				? ((await this.#runShakeTier(tier, { generation, detachPostCommit: false }))?.tokensFreed ?? 0)
+				: 0;
+			this.maybeStartSpeculativeCompaction(Math.max(0, contextTokens - tierFreed), contextWindow);
 		}
 		return COMPACTION_CHECK_NONE;
 	}

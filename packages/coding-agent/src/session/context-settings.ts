@@ -204,6 +204,32 @@ export const cfgCompactionThresholdTokens = register({
 	},
 });
 
+export const cfgCompactionShakeThresholdPercent = register({
+	id: "compaction.shakeThresholdPercent",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Early Shake Threshold",
+		description:
+			'Run the LLM-free, artifact-recoverable shake at this percent of the compaction threshold, before summarizing. Requires Auto-Compact and "shake" in Compaction Method Order.',
+		options: [
+			{
+				value: "0",
+				label: "Off",
+				description: "Shake only as a compaction method once the threshold is crossed",
+			},
+			{ value: "30", label: "30%" },
+			{ value: "40", label: "40%" },
+			{ value: "50", label: "50%", description: "Halfway to the compaction threshold" },
+			{ value: "60", label: "60%" },
+			{ value: "70", label: "70%" },
+			{ value: "80", label: "80%" },
+		],
+	},
+});
+
 /**
  * Per-model compaction limits for the models they match: `provider/model-id`
  * exactly, else the longest `…*` prefix. A token entry is the base the

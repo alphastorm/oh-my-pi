@@ -790,6 +790,7 @@ compaction:
    midTurnEnabled: true # check thresholds between tool-loop provider requests
    thresholdPercent: -1 # -1 = default reserve-based behavior
    thresholdTokens: -1 # fixed token limit when > 0
+   shakeThresholdPercent: 0 # 0 = off; e.g. 50 shakes at half the resolved threshold
 memory:
    backend: off # off, local, hindsight, mnemopi
 ```
@@ -805,6 +806,7 @@ memory:
 | `compaction.methodOrder`                 | array   | `remote, snapcompact, handoff, shake, soft` | Ordered fallbacks. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta); unavailable or failed methods advance.                                                                                |
 | `compaction.thresholdPercent`            | number  | `-1`                                        | Percent-of-context trigger; `-1` = reserve-based default.                                                                                                                                                                                       |
 | `compaction.thresholdTokens`             | number  | `-1`                                        | Fixed token trigger when `> 0`.                                                                                                                                                                                                                 |
+| `compaction.shakeThresholdPercent`       | number  | `0`                                         | Opt-in LLM-free, artifact-recoverable shake at this percent of the resolved compaction threshold, before summarizing. Requires Auto-Compact and `shake` in `methodOrder`; values outside `0 < N < 100` disable the tier.                        |
 | `compaction.modelThresholds`             | record  | `{}`                                        | Per-model compaction limit keyed by `provider/model-id` or a `*`-terminated prefix (`deepseek/*`): a token base the compaction policy scales (`90000`), a fixed token trigger (`"f90000"`), or a percentage of the window (`"80%"`). See below. |
 | `compaction.modelThresholdsEnabled`      | boolean | `true`                                      | Whether `compaction.modelThresholds` applies. Subagents with a `task.agentCompactionThresholdOverrides` entry run with it off.                                                                                                                  |
 | `task.agentCompactionThresholdOverrides` | record  | `{}`                                        | Exact-name task/eval agent → compaction trigger: a positive token count (`90000`) or a percentage string (`"80%"`). See below.                                                                                                                  |
@@ -817,6 +819,8 @@ memory:
 | `autolearn.minToolCalls`                 | number  | `5`                                         | Minimum completed tool calls in a primary turn before automatic capture is eligible.                                                                                                                                                            |
 
 A positive `compaction.thresholdTokens` wins over `thresholdPercent`. A fixed trigger (this or an `f` model entry) at or past the model's context window, for example where a provider caps the window lower, compacts at the window less the reserve, like the reserve-based default; the `/models` preview marks it `capped by window`. Otherwise, a positive percentage is clamped to 1–99%; non-positive percentages use the reserve-based threshold.
+
+`compaction.shakeThresholdPercent` applies after that threshold is resolved, including per-model limits. For example, `50` with a 170,000-token trigger allows a shake from 85,000 tokens up to (but not including) the trigger. The tier keeps the recent prune-protected tail intact and only rewrites when eligible savings reach at least 10% of the trigger (minimum 4,000 tokens). It never escalates to summarizing or schedules a continuation, and is inactive with experimental context management or a running/ready speculative summary. Mid-turn passes also respect `compaction.midTurnEnabled`.
 
 The trigger is exactly what you configure. On a small or provider-capped window, compaction instead keeps less recent history: the kept tail is capped at `0.8 × trigger − reserveFloor` (half of `0.8 × trigger` when the floor alone fills it) so the compacted context lands under the trigger's recovery band, where `reserveFloor` is the smaller of the effective budget reserve and `compaction.reserveTokens` (or `16384` when unset). For example, a 100k window with `thresholdPercent: 40` compacts at 40,000 tokens and keeps at most 15,616 tokens of recent history instead of the configured 20,000.
 
